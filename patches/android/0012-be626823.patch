@@ -1,0 +1,83 @@
+diff --git a/app/src/androidTest/java/org/ekatra/alfred/data/DatabaseMigrationTest.kt b/app/src/androidTest/java/org/ekatra/alfred/data/DatabaseMigrationTest.kt
+index 4aaa35c..d6bfe39 100644
+--- a/app/src/androidTest/java/org/ekatra/alfred/data/DatabaseMigrationTest.kt
++++ b/app/src/androidTest/java/org/ekatra/alfred/data/DatabaseMigrationTest.kt
+@@ -7,6 +7,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
+ import androidx.test.platform.app.InstrumentationRegistry
+ import org.ekatra.alfred.data.local.EkatraDatabase
+ import org.ekatra.alfred.data.local.MIGRATION_3_4
++import org.junit.Assert.assertTrue
+ import org.junit.Rule
+ import org.junit.Test
+ import org.junit.runner.RunWith
+@@ -120,29 +121,29 @@ class DatabaseMigrationTest {
+ 
+         // Verify existing data survived
+         val cursor = migratedDb.query("SELECT * FROM chat_sessions WHERE id = 1")
+-        assert(cursor.moveToFirst()) { "Session should exist after migration" }
+-        assert(cursor.getString(cursor.getColumnIndex("title")) == "Test Chat")
++        assertTrue("Session should exist after migration", cursor.moveToFirst())
++        assertTrue(cursor.getString(cursor.getColumnIndex("title")) == "Test Chat")
+ 
+         // Verify new columns exist with defaults
+         val userIdIdx = cursor.getColumnIndex("userId")
+-        assert(userIdIdx >= 0) { "userId column should exist" }
+-        assert(cursor.isNull(userIdIdx)) { "userId should default to NULL" }
++        assertTrue("userId column should exist", userIdIdx >= 0)
++        assertTrue("userId should default to NULL", cursor.isNull(userIdIdx))
+ 
+         // Verify messages have rating column
+         val msgCursor = migratedDb.query("SELECT * FROM chat_messages WHERE id = 1")
+-        assert(msgCursor.moveToFirst())
++        assertTrue(msgCursor.moveToFirst())
+         val ratingIdx = msgCursor.getColumnIndex("rating")
+-        assert(ratingIdx >= 0) { "rating column should exist" }
+-        assert(msgCursor.getInt(ratingIdx) == 0) { "rating should default to 0" }
++        assertTrue("rating column should exist", ratingIdx >= 0)
++        assertTrue("rating should default to 0", msgCursor.getInt(ratingIdx) == 0)
+ 
+         // Verify new tables exist
+         val profileCursor = migratedDb.query("SELECT count(*) FROM user_profiles")
+-        assert(profileCursor.moveToFirst())
+-        assert(profileCursor.getInt(0) == 0) { "user_profiles should be empty" }
++        assertTrue(profileCursor.moveToFirst())
++        assertTrue("user_profiles should be empty", profileCursor.getInt(0) == 0)
+ 
+         val syncCursor = migratedDb.query("SELECT count(*) FROM sync_queue")
+-        assert(syncCursor.moveToFirst())
+-        assert(syncCursor.getInt(0) == 0) { "sync_queue should be empty" }
++        assertTrue(syncCursor.moveToFirst())
++        assertTrue("sync_queue should be empty", syncCursor.getInt(0) == 0)
+ 
+         migratedDb.close()
+     }
+@@ -168,8 +169,8 @@ class DatabaseMigrationTest {
+         )
+ 
+         val cursor = migratedDb.query("SELECT count(*) FROM chat_sessions")
+-        assert(cursor.moveToFirst())
+-        assert(cursor.getInt(0) == 10) { "All 10 sessions should survive migration" }
++        assertTrue(cursor.moveToFirst())
++        assertTrue("All 10 sessions should survive migration", cursor.getInt(0) == 10)
+ 
+         migratedDb.close()
+     }
+diff --git a/app/src/main/java/org/ekatra/alfred/data/local/EkatraDatabase.kt b/app/src/main/java/org/ekatra/alfred/data/local/EkatraDatabase.kt
+index 40778a6..2416eca 100644
+--- a/app/src/main/java/org/ekatra/alfred/data/local/EkatraDatabase.kt
++++ b/app/src/main/java/org/ekatra/alfred/data/local/EkatraDatabase.kt
+@@ -89,9 +89,12 @@ abstract class EkatraDatabase : RoomDatabase() {
+                 )
+                 .addMigrations(MIGRATION_3_4)
+                 .build().also {
+-                    it.openHelper.writableDatabase.query("PRAGMA wal_checkpoint(TRUNCATE)").close()
+                     INSTANCE = it
+-                    Log.d("EkatraDatabase", "Room database initialized v4")
++                    // Opening runs migrations; do it off the injecting (often main) thread
++                    Thread({
++                        it.openHelper.writableDatabase.query("PRAGMA wal_checkpoint(TRUNCATE)").close()
++                        Log.d("EkatraDatabase", "Room database initialized v4")
++                    }, "db-warmup").start()
+                 }
+             }
+     }
