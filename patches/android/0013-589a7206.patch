@@ -1,0 +1,15 @@
+diff --git a/app/proguard-rules.pro b/app/proguard-rules.pro
+index 6475abd..22e4bec 100644
+--- a/app/proguard-rules.pro
++++ b/app/proguard-rules.pro
+@@ -32,3 +32,10 @@
+ # Data models (Firestore deserialization)
+ -keep class org.ekatra.alfred.data.model.UserProfile { *; }
+ -keep class org.ekatra.alfred.data.model.ChatAnalytics { *; }
++
++# Strip verbose/debug/info logging from release builds (chat snippets, device details)
++-assumenosideeffects class android.util.Log {
++    public static int v(...);
++    public static int d(...);
++    public static int i(...);
++}
