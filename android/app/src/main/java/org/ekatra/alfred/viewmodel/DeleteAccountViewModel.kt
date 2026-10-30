@@ -49,7 +49,7 @@ class DeleteAccountViewModel @Inject constructor(
 
     fun onCancel() {
         passwordReply?.complete(null)
-        _uiState.update { it.copy(confirming = false, needsPassword = false) }
+        _uiState.update { it.copy(confirming = false, needsPassword = false, failedStep = null) }
     }
 
     /** Starts deletion. Called only from the confirm button. */

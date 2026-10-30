@@ -1,0 +1,223 @@
+diff --git a/app/src/asmaa/res/values/strings.xml b/app/src/asmaa/res/values/strings.xml
+index 1caacca..70d789a 100644
+--- a/app/src/asmaa/res/values/strings.xml
++++ b/app/src/asmaa/res/values/strings.xml
+@@ -134,6 +134,20 @@
+     <string name="settings_export_sub">تنزيل سجل المحادثات كاملاً بصيغة JSON</string>
+     <string name="settings_delete_cloud">حذف البيانات السحابية</string>
+     <string name="settings_delete_cloud_sub">إزالة جميع البيانات المتزامنة من الخوادم</string>
++    <string name="settings_delete_account">حذف الحساب</string>
++    <string name="settings_delete_account_sub">حذف حسابك وبياناتك نهائياً</string>
++    <string name="delete_account_title">هل تريد حذف حسابك؟</string>
++    <string name="delete_account_message">سيتم حذف حسابك وملفك الشخصي وبياناتك المتزامنة نهائياً. كما تُحذف المحادثات المخزنة على هذا الجهاز. لا يمكن التراجع عن هذا الإجراء.</string>
++    <string name="delete_account_confirm">حذف الحساب</string>
++    <string name="delete_account_cancel">إلغاء</string>
++    <string name="delete_account_password_title">أكّد كلمة المرور</string>
++    <string name="delete_account_password_message">لحمايتك، أدخل كلمة المرور لإكمال حذف حسابك.</string>
++    <string name="delete_account_password_hint">كلمة المرور</string>
++    <string name="delete_account_password_submit">متابعة</string>
++    <string name="delete_account_in_progress">جارٍ حذف حسابك…</string>
++    <string name="delete_account_failed">تعذّر حذف حسابك. تحقق من الاتصال وحاول مرة أخرى.</string>
++    <string name="delete_account_failed_reauth">تعذّر التحقق من هويتك، لذلك لم يُحذف حسابك. حاول مرة أخرى.</string>
++    <string name="delete_account_retry">حاول مرة أخرى</string>
+     <string name="settings_log_out">تسجيل الخروج</string>
+     <string name="settings_version_footer">أسماء v%1$s • إكترة</string>
+     <string name="nav_chat">الدردشة</string>
+diff --git a/app/src/main/java/org/ekatra/alfred/SettingsActivity.kt b/app/src/main/java/org/ekatra/alfred/SettingsActivity.kt
+index 784e643..0a71226 100644
+--- a/app/src/main/java/org/ekatra/alfred/SettingsActivity.kt
++++ b/app/src/main/java/org/ekatra/alfred/SettingsActivity.kt
+@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.dp
+ import androidx.compose.ui.unit.sp
+ import androidx.hilt.navigation.compose.hiltViewModel
+ import dagger.hilt.android.AndroidEntryPoint
++import org.ekatra.alfred.viewmodel.DeleteAccountViewModel
+ import org.ekatra.alfred.viewmodel.SettingsViewModel
+ import java.io.File
+ import java.text.SimpleDateFormat
+@@ -47,6 +48,23 @@ class SettingsActivity : ComponentActivity() {
+                 EkatraSettingsTheme {
+                     val viewModel: SettingsViewModel = hiltViewModel()
+                     val uiState by viewModel.uiState.collectAsState()
++                    val deleteViewModel: DeleteAccountViewModel = hiltViewModel()
++                    val deleteState by deleteViewModel.uiState.collectAsState()
++
++                    LaunchedEffect(deleteState.deleted) {
++                        if (deleteState.deleted) {
++                            startActivity(Intent(this@SettingsActivity, ProfileActivity::class.java).apply {
++                                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
++                            })
++                        }
++                    }
++
++                    DeleteAccountDialogs(
++                        state = deleteState,
++                        onConfirm = deleteViewModel::onConfirm,
++                        onCancel = deleteViewModel::onCancel,
++                        onSubmitPassword = deleteViewModel::submitPassword
++                    )
+ 
+                     SettingsScreen(
+                         userName = uiState.userProfile?.name ?: stringResource(R.string.settings_guest),
+@@ -122,6 +140,7 @@ class SettingsActivity : ComponentActivity() {
+                                 }
+                             }
+                         },
++                        onDeleteAccount = deleteViewModel::onDeleteRequested,
+                         onDeleteCloudData = {
+                             val profile = uiState.userProfile
+                             val now = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
+@@ -184,7 +203,8 @@ fun SettingsScreen(
+     onHostModeClick: () -> Unit = {},
+     onLogOut: () -> Unit,
+     onExportData: () -> Unit,
+-    onDeleteCloudData: () -> Unit
++    onDeleteCloudData: () -> Unit,
++    onDeleteAccount: () -> Unit = {}
+ ) {
+     Scaffold(
+         topBar = {
+@@ -351,6 +371,15 @@ fun SettingsScreen(
+                 subtitle = stringResource(R.string.settings_delete_cloud_sub),
+                 onClick = onDeleteCloudData
+             )
++
++            Spacer(modifier = Modifier.height(12.dp))
++
++            SettingsItem(
++                icon = "⚠️",
++                title = stringResource(R.string.settings_delete_account),
++                subtitle = stringResource(R.string.settings_delete_account_sub),
++                onClick = onDeleteAccount
++            )
+             
+             Spacer(modifier = Modifier.height(32.dp))
+             
+@@ -379,6 +408,102 @@ fun SettingsScreen(
+     }
+ }
+ 
++/** Confirmation, password, progress and error dialogs for [DeleteAccountViewModel]. */
++@Composable
++fun DeleteAccountDialogs(
++    state: DeleteAccountViewModel.UiState,
++    onConfirm: () -> Unit,
++    onCancel: () -> Unit,
++    onSubmitPassword: (String) -> Unit
++) {
++    val danger = Color(0xFFEF4444)
++
++    if (state.confirming) {
++        AlertDialog(
++            onDismissRequest = onCancel,
++            title = { Text(stringResource(R.string.delete_account_title)) },
++            text = { Text(stringResource(R.string.delete_account_message)) },
++            confirmButton = {
++                TextButton(onClick = onConfirm) {
++                    Text(stringResource(R.string.delete_account_confirm), color = danger)
++                }
++            },
++            dismissButton = {
++                TextButton(onClick = onCancel) {
++                    Text(stringResource(R.string.delete_account_cancel))
++                }
++            }
++        )
++    }
++
++    if (state.needsPassword) {
++        var password by remember { mutableStateOf("") }
++        AlertDialog(
++            onDismissRequest = onCancel,
++            title = { Text(stringResource(R.string.delete_account_password_title)) },
++            text = {
++                Column {
++                    Text(stringResource(R.string.delete_account_password_message))
++                    Spacer(Modifier.height(12.dp))
++                    OutlinedTextField(
++                        value = password,
++                        onValueChange = { password = it },
++                        label = { Text(stringResource(R.string.delete_account_password_hint)) },
++                        singleLine = true,
++                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation()
++                    )
++                }
++            },
++            confirmButton = {
++                TextButton(onClick = { onSubmitPassword(password) }, enabled = password.isNotEmpty()) {
++                    Text(stringResource(R.string.delete_account_password_submit))
++                }
++            },
++            dismissButton = {
++                TextButton(onClick = onCancel) {
++                    Text(stringResource(R.string.delete_account_cancel))
++                }
++            }
++        )
++    }
++
++    if (state.inProgress && !state.needsPassword) {
++        AlertDialog(
++            onDismissRequest = {},
++            confirmButton = {},
++            text = {
++                Row(verticalAlignment = Alignment.CenterVertically) {
++                    CircularProgressIndicator(modifier = Modifier.size(24.dp))
++                    Spacer(Modifier.width(16.dp))
++                    Text(stringResource(R.string.delete_account_in_progress))
++                }
++            }
++        )
++    }
++
++    state.failedStep?.let { step ->
++        val message = if (step == org.ekatra.alfred.data.account.AccountDeleter.Step.REAUTHENTICATION) {
++            R.string.delete_account_failed_reauth
++        } else {
++            R.string.delete_account_failed
++        }
++        AlertDialog(
++            onDismissRequest = onCancel,
++            text = { Text(stringResource(message)) },
++            confirmButton = {
++                TextButton(onClick = onConfirm) {
++                    Text(stringResource(R.string.delete_account_retry))
++                }
++            },
++            dismissButton = {
++                TextButton(onClick = onCancel) {
++                    Text(stringResource(R.string.delete_account_cancel))
++                }
++            }
++        )
++    }
++}
++
+ @Composable
+ fun SectionTitle(text: String) {
+     Text(
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 49f94aa..b8695fe 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -135,6 +135,20 @@
+     <string name="settings_export_sub">Download your full chat history as JSON</string>
+     <string name="settings_delete_cloud">Delete Cloud Data</string>
+     <string name="settings_delete_cloud_sub">Remove all synced data from our servers</string>
++    <string name="settings_delete_account">Delete account</string>
++    <string name="settings_delete_account_sub">Permanently delete your account and data</string>
++    <string name="delete_account_title">Delete your account?</string>
++    <string name="delete_account_message">This permanently deletes your account, your profile and your synced data. Chats stored on this device are also removed. This cannot be undone.</string>
++    <string name="delete_account_confirm">Delete account</string>
++    <string name="delete_account_cancel">Cancel</string>
++    <string name="delete_account_password_title">Confirm your password</string>
++    <string name="delete_account_password_message">For your security, enter your password to finish deleting your account.</string>
++    <string name="delete_account_password_hint">Password</string>
++    <string name="delete_account_password_submit">Continue</string>
++    <string name="delete_account_in_progress">Deleting your account…</string>
++    <string name="delete_account_failed">We could not delete your account. Check your connection and try again.</string>
++    <string name="delete_account_failed_reauth">We could not confirm your identity, so your account was not deleted. Try again.</string>
++    <string name="delete_account_retry">Try again</string>
+     <string name="settings_log_out">Log Out</string>
+     <string name="settings_version_footer">Maya v%1$s • Ekatra</string>
+     <string name="nav_chat">Chat</string>
