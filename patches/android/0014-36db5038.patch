@@ -1,0 +1,61 @@
+diff --git a/app/src/main/java/org/ekatra/alfred/tools/MathInterceptor.kt b/app/src/main/java/org/ekatra/alfred/tools/MathInterceptor.kt
+index ddd22b5..093974a 100644
+--- a/app/src/main/java/org/ekatra/alfred/tools/MathInterceptor.kt
++++ b/app/src/main/java/org/ekatra/alfred/tools/MathInterceptor.kt
+@@ -49,7 +49,7 @@ class MathInterceptor(private val persona: Persona = ActivePersona) {
+      *   - Powers ("2 to the power of 10", "2^10")
+      */
+     internal fun tryEvaluateMath(input: String): String? {
+-        val text = input.trim().lowercase()
++        val text = normalizeDigits(input.trim().lowercase())
+ 
+         // Percentage: "what is X% of Y"
+         val pctRegex = Regex("""(\d+(?:\.\d+)?)\s*%\s*(?:of|من)\s*(\d+(?:\.\d+)?)""")
+@@ -75,11 +75,12 @@ class MathInterceptor(private val persona: Persona = ActivePersona) {
+         }
+ 
+         // General arithmetic: extract something that looks like "A op B (op C ...)"
++        // English operator words only as whole words ("over" must not hit "discover")
+         var expr = text
+             .replace("×", "*").replace("÷", "/")
+-            .replace("plus", "+").replace("minus", "-")
+-            .replace("times", "*").replace("multiplied by", "*")
+-            .replace("divided by", "/").replace("over", "/")
++            .replace(Regex("""\bplus\b"""), "+").replace(Regex("""\bminus\b"""), "-")
++            .replace(Regex("""\btimes\b"""), "*").replace(Regex("""\bmultiplied by\b"""), "*")
++            .replace(Regex("""\bdivided by\b"""), "/").replace(Regex("""\bover\b"""), "/")
+             .replace("زائد", "+").replace("ناقص", "-")
+             .replace("ضرب", "*").replace("قسمة", "/")
+ 
+@@ -92,6 +93,7 @@ class MathInterceptor(private val persona: Persona = ActivePersona) {
+         if (!expr.matches(Regex("""[\d\s+\-*/().]+"""))) return null
+         if (!expr.contains(Regex("""[+\-*/]"""))) return null
+         if (!expr.contains(Regex("""\d"""))) return null
++        if (looksLikeDate(expr)) return null
+ 
+         return try {
+             val result = evalSimpleExpr(expr)
+@@ -102,6 +104,23 @@ class MathInterceptor(private val persona: Persona = ActivePersona) {
+         }
+     }
+ 
++    // "15/8/1947" or "1857-1947" are dates and year ranges, not sums to solve
++    private fun looksLikeDate(expr: String): Boolean =
++        expr.matches(Regex("""\d{1,2}\s*/\s*\d{1,2}\s*/\s*\d{2,4}""")) ||
++            expr.matches(Regex("""\d{1,2}\s*-\s*\d{1,2}\s*-\s*\d{2,4}""")) ||
++            expr.matches(Regex("""(1\d|20)\d{2}\s*-\s*(1\d|20)\d{2}"""))
++
++    // Arabic-Indic (٠-٩) and Persian (۰-۹) digits to ASCII so Arabic questions are recognised
++    private fun normalizeDigits(text: String): String = buildString(text.length) {
++        for (c in text) append(
++            when (c) {
++                in '\u0660'..'\u0669' -> '0' + (c - '\u0660')
++                in '\u06F0'..'\u06F9' -> '0' + (c - '\u06F0')
++                else -> c
++            }
++        )
++    }
++
+     /** Simple recursive-descent evaluator for +, -, *, / with parentheses. */
+     internal fun evalSimpleExpr(expr: String): Double {
+         val tokens = expr.replace(" ", "")
