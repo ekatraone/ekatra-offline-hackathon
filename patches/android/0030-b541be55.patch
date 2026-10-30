@@ -1,0 +1,26 @@
+diff --git a/app/src/asmaa/res/values/strings.xml b/app/src/asmaa/res/values/strings.xml
+index d18b462..1edfe8f 100644
+--- a/app/src/asmaa/res/values/strings.xml
++++ b/app/src/asmaa/res/values/strings.xml
+@@ -62,7 +62,7 @@
+     <string name="privacy_collect_subjects">تفضيلات المواد وأنماط الاستخدام</string>
+     <string name="privacy_collect_device">طراز الجهاز لتحسين الأداء</string>
+     <string name="privacy_collect_crashes">تقارير الأعطال لإصلاح المشكلات</string>
+-    <string name="privacy_collect_profile">عند تسجيل الدخول: اسمك وبريدك الإلكتروني وبلدك وصفك الدراسي، لمزامنة ملفك الشخصي</string>
++    <string name="privacy_collect_profile">عند تسجيل الدخول: اسمك وبلدك وصفك الدراسي ولغتك المفضلة ورقم هاتفك (إن وُجد في طريقة تسجيل دخولك)، لمزامنة ملفك الشخصي</string>
+     <string name="privacy_minor_notice">إذا كان عمرك أقل من 18 عامًا، يُرجى قراءة هذا مع أحد الوالدين أو ولي الأمر قبل الموافقة.</string>
+     <string name="privacy_we_dont_collect">ما الذي لا نجمعه:</string>
+     <string name="privacy_no_messages">رسائلك أو أسئلتك الفعلية</string>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 6e38642..9a89431 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -63,7 +63,7 @@
+     <string name="privacy_collect_subjects">Subject preferences and usage patterns</string>
+     <string name="privacy_collect_device">Device model for performance optimization</string>
+     <string name="privacy_collect_crashes">Crash reports to fix bugs</string>
+-    <string name="privacy_collect_profile">If you sign in: your name, email, country and grade, to sync your profile</string>
++    <string name="privacy_collect_profile">If you sign in: your name, country, grade, preferred language and phone number (if your sign-in has one), to sync your profile</string>
+     <string name="privacy_minor_notice">If you are under 18, please read this with a parent or guardian before accepting.</string>
+     <string name="privacy_we_dont_collect">What we DON\'T collect:</string>
+     <string name="privacy_no_messages">Your actual chat messages or questions</string>
