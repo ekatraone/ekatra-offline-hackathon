@@ -1,0 +1,42 @@
+diff --git a/app/src/main/java/org/ekatra/alfred/ProfileActivity.kt b/app/src/main/java/org/ekatra/alfred/ProfileActivity.kt
+index 38563c8..ca6f123 100644
+--- a/app/src/main/java/org/ekatra/alfred/ProfileActivity.kt
++++ b/app/src/main/java/org/ekatra/alfred/ProfileActivity.kt
+@@ -79,10 +79,12 @@ class ProfileActivity : ComponentActivity() {
+                 ) {
+                     val uiState by viewModel.uiState.collectAsState()
+ 
+-                    // If opened from Settings, load existing profile for editing
++                    // From Settings: load the profile for editing. Otherwise resume a signed-in session.
+                     LaunchedEffect(isEditMode) {
+                         if (isEditMode) {
+                             viewModel.loadExistingProfile()
++                        } else {
++                            viewModel.checkExistingAuth()
+                         }
+                     }
+ 
+diff --git a/app/src/main/java/org/ekatra/alfred/viewmodel/ProfileViewModel.kt b/app/src/main/java/org/ekatra/alfred/viewmodel/ProfileViewModel.kt
+index 30afdb3..7c35054 100644
+--- a/app/src/main/java/org/ekatra/alfred/viewmodel/ProfileViewModel.kt
++++ b/app/src/main/java/org/ekatra/alfred/viewmodel/ProfileViewModel.kt
+@@ -67,11 +67,15 @@ class ProfileViewModel @Inject constructor(
+     // private var verificationId: String? = null  // TODO: Enable when Firebase Phone Auth is available
+     // private var resendToken: PhoneAuthProvider.ForceResendingToken? = null  // TODO: Enable when Firebase Phone Auth is available
+ 
+-    init {
+-        checkExistingAuth()
+-    }
++    private var authChecked = false
+ 
+-    private fun checkExistingAuth() {
++    /**
++     * Resumes a signed-in session. The login flow calls this; edit mode (Settings > Profile)
++     * does not, because there AUTHENTICATED means "saved, go back" and the screen would close.
++     */
++    fun checkExistingAuth() {
++        if (authChecked) return
++        authChecked = true
+         viewModelScope.launch {
+             val currentUser = firebaseAuth.currentUser
+             if (currentUser != null) {
