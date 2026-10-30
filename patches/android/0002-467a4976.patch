@@ -1,0 +1,544 @@
+diff --git a/app/src/main/cpp/llama_jni.cpp b/app/src/main/cpp/llama_jni.cpp
+index 8136ac9..deaa4a7 100644
+--- a/app/src/main/cpp/llama_jni.cpp
++++ b/app/src/main/cpp/llama_jni.cpp
+@@ -48,6 +48,32 @@ static int g_n_threads = 4;
+ static int g_n_ctx = 2048;
+ static int g_n_past = 0;
+ static bool g_is_generating = false;
++// Bytes of a multibyte UTF-8 character split across tokens, held until the rest arrives
++static std::string g_pending_utf8;
++
++// Length of the longest prefix of s that does not end inside a UTF-8 sequence
++static size_t complete_utf8_prefix(const std::string& s) {
++    size_t i = s.size();
++    // Walk back over at most 3 continuation bytes to the lead byte of the last sequence
++    size_t back = 0;
++    while (i > 0 && back < 4 && (static_cast<unsigned char>(s[i - 1]) & 0xC0) == 0x80) { i--; back++; }
++    if (i == 0) return s.size(); // only continuation bytes: invalid, pass through
++    unsigned char lead = static_cast<unsigned char>(s[i - 1]);
++    size_t need = (lead & 0x80) == 0x00 ? 1 : (lead & 0xE0) == 0xC0 ? 2 : (lead & 0xF0) == 0xE0 ? 3 : (lead & 0xF8) == 0xF0 ? 4 : 1;
++    return (back + 1 >= need) ? s.size() : i - 1;
++}
++
++static jbyteArray to_jbytes(JNIEnv* env, const std::string& s) {
++    jbyteArray arr = env->NewByteArray(static_cast<jsize>(s.size()));
++    if (!s.empty()) env->SetByteArrayRegion(arr, 0, static_cast<jsize>(s.size()), reinterpret_cast<const jbyte*>(s.data()));
++    return arr;
++}
++
++static void reset_generation_state() {
++    g_n_past = 0;
++    g_is_generating = false;
++    g_pending_utf8.clear();
++}
+ 
+ // Helper: Convert token to string using modern API
+ static std::string token_to_piece(const llama_model* model, llama_token token) {
+@@ -125,7 +151,9 @@ Java_org_ekatra_alfred_LlamaEngine_nativeLoadModel(
+     g_n_threads = threads > 0 ? threads : 4;
+     g_n_ctx = context_size > 0 ? context_size : 2048;
+     
+-    // Clean up any existing model
++    // Clean up any existing model. Reset generation state too: a token loop still
++    // running in Kotlin must see "not generating" rather than sample a fresh context.
++    reset_generation_state();
+     if (g_sampler) { llama_sampler_free(g_sampler); g_sampler = nullptr; }
+     if (g_ctx) { llama_free(g_ctx); g_ctx = nullptr; }
+     if (g_model) { llama_model_free(g_model); g_model = nullptr; }
+@@ -195,10 +223,19 @@ Java_org_ekatra_alfred_LlamaEngine_nativePrepare(
+     std::string prompt(promptStr);
+     env->ReleaseStringUTFChars(prompt_text, promptStr);
+     
++    // Every caller sends the full conversation, so start from an empty KV cache.
++    // Appending to the previous turn's cache duplicated history and overflowed n_ctx.
++    llama_memory_clear(llama_get_memory(g_ctx), true);
++    reset_generation_state();
++
+     // Tokenize prompt
+     auto tokens = tokenize(g_model, prompt, true);
+-    LOGI("Prompt tokenized: %zu tokens (context at %d tokens)", tokens.size(), g_n_past);
+-    
++    LOGI("Prompt tokenized: %zu tokens (n_ctx %d)", tokens.size(), g_n_ctx);
++    if ((int)tokens.size() >= g_n_ctx) {
++        LOGE("Prompt of %zu tokens does not fit context of %d", tokens.size(), g_n_ctx);
++        return JNI_FALSE;
++    }
++
+     // Evaluate prompt in batches
+     int n_batch = 512;
+     for (int i = 0; i < (int)tokens.size(); i += n_batch) {
+@@ -220,41 +257,67 @@ Java_org_ekatra_alfred_LlamaEngine_nativePrepare(
+     return JNI_TRUE;
+ }
+ 
+-JNIEXPORT jstring JNICALL
++// Returns the UTF-8 bytes of the next token, an empty array when the token only
++// completed part of a multibyte character, or null at end of generation / on error.
++// Bytes (not jstring) because NewStringUTF needs complete modified UTF-8.
++JNIEXPORT jbyteArray JNICALL
+ Java_org_ekatra_alfred_LlamaEngine_nativeGenerateToken(
+         JNIEnv* env, jobject /* this */) {
+-    
++
+     std::lock_guard<std::mutex> lock(g_mutex);
+-    
++
+     if (!g_model || !g_ctx || !g_sampler || !g_is_generating) {
+         LOGE("Not ready to generate");
+-        return env->NewStringUTF("");
++        return nullptr;
+     }
+-    
++
++    if (g_n_past >= g_n_ctx) {
++        LOGW("Context full at %d tokens; ending generation", g_n_past);
++        g_is_generating = false;
++        return nullptr;
++    }
++
+     // Sample next token
+     llama_token new_token = llama_sampler_sample(g_sampler, g_ctx, -1);
+-    
++
+     // Check for end of generation using modern API
+     if (llama_vocab_is_eog(llama_model_get_vocab(g_model), new_token)) {
+         LOGI("End of generation");
+         g_is_generating = false;
+-        return env->NewStringUTF("");
++        return nullptr;
+     }
+-    
++
+     // Decode token to string
+-    std::string piece = token_to_piece(g_model, new_token);
+-    
++    g_pending_utf8 += token_to_piece(g_model, new_token);
++
+     // Update context with new token
+     llama_batch batch = llama_batch_get_one(&new_token, 1);
+-    
++
+     if (llama_decode(g_ctx, batch) != 0) {
+         LOGE("Failed to evaluate");
+-        return env->NewStringUTF("");
++        g_is_generating = false;
++        return nullptr;
+     }
+-    
++
+     g_n_past++;
+-    
+-    return env->NewStringUTF(piece.c_str());
++
++    size_t n = complete_utf8_prefix(g_pending_utf8);
++    std::string out = g_pending_utf8.substr(0, n);
++    g_pending_utf8.erase(0, n);
++    return to_jbytes(env, out);
++}
++
++JNIEXPORT jint JNICALL
++Java_org_ekatra_alfred_LlamaEngine_nativeCountTokens(
++        JNIEnv* env, jobject /* this */, jstring text) {
++
++    std::lock_guard<std::mutex> lock(g_mutex);
++    if (!g_model) return -1;
++
++    const char* str = env->GetStringUTFChars(text, nullptr);
++    std::string s(str);
++    env->ReleaseStringUTFChars(text, str);
++    return (jint)tokenize(g_model, s, true).size();
+ }
+ 
+ JNIEXPORT void JNICALL
+@@ -267,8 +330,7 @@ Java_org_ekatra_alfred_LlamaEngine_nativeClearContext(
+         LOGI("Clearing conversation context");
+         llama_memory_t mem = llama_get_memory(g_ctx);
+         llama_memory_clear(mem, true);  // true = also clear data buffers
+-        g_n_past = 0;
+-        g_is_generating = false;
++        reset_generation_state();
+     }
+ }
+ 
+@@ -283,10 +345,9 @@ Java_org_ekatra_alfred_LlamaEngine_nativeUnload(
+     if (g_sampler) { llama_sampler_free(g_sampler); g_sampler = nullptr; }
+     if (g_ctx) { llama_free(g_ctx); g_ctx = nullptr; }
+     if (g_model) { llama_model_free(g_model); g_model = nullptr; }
+-    
+-    g_n_past = 0;
+-    g_is_generating = false;
+-    
++
++    reset_generation_state();
++
+     LOGI("Model unloaded");
+ }
+ 
+diff --git a/app/src/main/java/org/ekatra/alfred/AlfredServer.kt b/app/src/main/java/org/ekatra/alfred/AlfredServer.kt
+index 7b4b0ef..ff83f7e 100644
+--- a/app/src/main/java/org/ekatra/alfred/AlfredServer.kt
++++ b/app/src/main/java/org/ekatra/alfred/AlfredServer.kt
+@@ -147,7 +147,7 @@ class AlfredServer(
+     }
+     
+     private fun handleStatus(): Response {
+-        val ready = engine.isReady()
++        val ready = engine.isLoaded()
+         Log.d(TAG, "Status check - modelReady=$ready")
+         val status = StatusResponse(
+             status = if (ready) "ready" else "loading",
+@@ -179,10 +179,11 @@ class AlfredServer(
+             }
+             
+             val nameTag = if (studentName.isNotBlank()) " [student=$studentName]" else ""
+-            Log.d(TAG, "Chat request$nameTag: '${message.take(50)}...' modelReady=${engine.isReady()}")
++            Log.d(TAG, "Chat request$nameTag: '${message.take(50)}...' modelLoaded=${engine.isLoaded()}")
+             
+-            if (!engine.isReady()) {
+-                Log.e(TAG, "Model not ready!")
++            // isLoaded: a busy model queues on inferenceMutex instead of rejecting
++            if (!engine.isLoaded()) {
++                Log.e(TAG, "Model not loaded")
+                 return errorResponse("Model not loaded")
+             }
+ 
+diff --git a/app/src/main/java/org/ekatra/alfred/AlfredServerService.kt b/app/src/main/java/org/ekatra/alfred/AlfredServerService.kt
+index 3e2ab0a..23e5629 100644
+--- a/app/src/main/java/org/ekatra/alfred/AlfredServerService.kt
++++ b/app/src/main/java/org/ekatra/alfred/AlfredServerService.kt
+@@ -51,8 +51,9 @@ class AlfredServerService : Service() {
+ 
+         val app = application as EkatraApp
+ 
+-        // Ensure model is loaded before accepting requests
+-        if (!llamaEngine.isReady()) {
++        // Ensure model is loaded before accepting requests. isLoaded, not isReady:
++        // a model busy generating in the chat UI must not be reloaded.
++        if (!llamaEngine.isLoaded()) {
+             Log.d(TAG, "Model not loaded (state=${llamaEngine.state}), loading now...")
+             serviceScope.launch {
+                 val loaded = ensureModelLoaded(app)
+diff --git a/app/src/main/java/org/ekatra/alfred/InferenceEngine.kt b/app/src/main/java/org/ekatra/alfred/InferenceEngine.kt
+index 2234ee5..4b816db 100644
+--- a/app/src/main/java/org/ekatra/alfred/InferenceEngine.kt
++++ b/app/src/main/java/org/ekatra/alfred/InferenceEngine.kt
+@@ -17,16 +17,24 @@ interface InferenceEngine {
+     /** Whether the engine has a model loaded and is ready to generate. */
+     fun isReady(): Boolean
+ 
++    /** Whether a model is loaded, including while it is generating. */
++    fun isLoaded(): Boolean = isReady()
++
+     /** Load a GGUF (or other format) model file. Returns true on success. */
+     suspend fun loadModel(modelFile: File): Boolean
+ 
++    /** Token count of [text] with the loaded model's tokenizer (estimate if unavailable). */
++    suspend fun countTokens(text: String): Int = text.length / 4
++
+     /**
+      * Generate a streaming response for [prompt].
+      *
+      * The prompt should be **fully formatted** (system + history + user turn)
+-     * — the engine does NOT re-wrap it in chat-ML tags.
++     * — the engine does NOT re-wrap it in chat-ML tags. Each generation starts
++     * from an empty KV-cache.
+      *
+-     * Each emitted [String] is a small batch of new tokens.
++     * Each emitted [String] is a small batch of new tokens. Throws
++     * [InferenceException] if the model is not ready or the prompt cannot be evaluated.
+      */
+     fun generateRaw(prompt: String): Flow<String>
+ 
+@@ -36,3 +44,5 @@ interface InferenceEngine {
+     /** Override the system prompt used by the engine's internal formatter (if any). */
+     fun setSystemPrompt(prompt: String)
+ }
++
++class InferenceException(message: String) : Exception(message)
+diff --git a/app/src/main/java/org/ekatra/alfred/LlamaEngine.kt b/app/src/main/java/org/ekatra/alfred/LlamaEngine.kt
+index 4d9b523..a677479 100644
+--- a/app/src/main/java/org/ekatra/alfred/LlamaEngine.kt
++++ b/app/src/main/java/org/ekatra/alfred/LlamaEngine.kt
+@@ -110,6 +110,13 @@ class LlamaEngine : InferenceEngine {
+             return@withContext false
+         }
+         
++        // Activity recreation and the hotspot service both call loadModel; reloading the
++        // same file mid-generation would free the context under the running token loop.
++        if (modelPath == modelFile.absolutePath && isLoaded()) {
++            Log.d(TAG, "${logPrefix()} Model already loaded, skipping reload")
++            return@withContext true
++        }
++
+         _state.value = State.LOADING
+         Log.d(TAG, "${logPrefix()} Loading model: ${modelFile.absolutePath}")
+         Log.d(TAG, "${logPrefix()} Model file size: ${modelFile.length() / 1_000_000} MB")
+@@ -166,23 +173,22 @@ class LlamaEngine : InferenceEngine {
+     }
+ 
+     // Shared generation implementation
++    // Failures throw InferenceException instead of emitting "[Error: ...]" text, which
++    // callers used to persist as the assistant's reply and feed back into later prompts.
+     private fun generateInternal(fullPrompt: String): Flow<String> = flow {
+         if (state != State.READY) {
+-            emit("[Error: Model not ready]")
+-            return@flow
++            throw InferenceException("Model not ready (state=$state)")
+         }
+-        
++
+         _state.value = State.GENERATING
+-        
+-        Log.d(TAG, "${logPrefix()} Generating response for: ${fullPrompt.take(50)}...")
+-        
++
++        Log.d(TAG, "${logPrefix()} Generating response (${fullPrompt.length} chars)")
++
+         try {
+-            // Prepare context
++            // Prepare context (native side clears the KV cache first)
+             val prepared = nativePrepare(fullPrompt)
+             if (!prepared) {
+-                Log.e(TAG, "Prompt preparation failed")
+-                emit("[Error: Prompt preparation failed]")
+-                return@flow
++                throw InferenceException("Prompt preparation failed")
+             }
+             
+             // Generate tokens - emit immediately for real-time streaming
+@@ -195,12 +201,14 @@ class LlamaEngine : InferenceEngine {
+             
+             while (tokenCount < maxTokens) {
+                 currentCoroutineContext().ensureActive()
+-                val token = nativeGenerateToken()
+-                
+-                // Empty string means end of generation (EOG token or error)
+-                if (token.isNullOrEmpty()) {
+-                    break
++                // null = end of generation (EOG, context full or error)
++                val bytes = nativeGenerateToken() ?: break
++                // Empty = token held back until its multibyte character completes
++                if (bytes.isEmpty()) {
++                    tokenCount++
++                    continue
+                 }
++                val token = String(bytes, Charsets.UTF_8)
+                 
+                 // Check for hard stop sequences in the token itself
+                 if (token.contains("<|") || token.contains("|>") || 
+@@ -250,12 +258,8 @@ class LlamaEngine : InferenceEngine {
+             }
+             
+             // Log the full output for debugging
+-            Log.d(TAG, "${logPrefix()} Full output text: ${fullText.toString().take(300)}")
+             Log.d(TAG, "${logPrefix()} Generated $tokenCount tokens")
+-            
+-        } catch (e: Exception) {
+-            Log.e(TAG, "Generation error", e)
+-            emit("[Error: ${e.message}]")
++
+         } finally {
+             _state.value = State.READY
+         }
+@@ -291,8 +295,16 @@ $userMessage<|im_end|>
+     
+     // Check if model is ready
+     override fun isReady(): Boolean = state == State.READY
+-    
+-    // Clear conversation context (for "New Chat" button)
++
++    override fun isLoaded(): Boolean = state == State.READY || state == State.GENERATING
++
++    override suspend fun countTokens(text: String): Int = withContext(Dispatchers.IO) {
++        val n = nativeCountTokens(text)
++        if (n >= 0) n else text.length / 4
++    }
++
++    // Clear conversation context. nativePrepare already starts each generation fresh;
++    // kept for callers that want to free KV memory eagerly.
+     override fun clearContext() {
+         if (state != State.UNINITIALIZED) {
+             Log.d(TAG, "Clearing conversation context")
+@@ -306,7 +318,8 @@ $userMessage<|im_end|>
+     private external fun nativeFreeBackend()
+     private external fun nativeLoadModel(path: String, threads: Int, contextSize: Int, useGpu: Boolean, gpuLayers: Int): Int
+     private external fun nativePrepare(prompt: String): Boolean
+-    private external fun nativeGenerateToken(): String?
++    private external fun nativeGenerateToken(): ByteArray?
++    private external fun nativeCountTokens(text: String): Int
+     private external fun nativeClearContext(): Unit
+     private external fun nativeUnload(): Unit
+ }
+diff --git a/app/src/main/java/org/ekatra/alfred/viewmodel/ChatViewModel.kt b/app/src/main/java/org/ekatra/alfred/viewmodel/ChatViewModel.kt
+index 444ffff..5990058 100644
+--- a/app/src/main/java/org/ekatra/alfred/viewmodel/ChatViewModel.kt
++++ b/app/src/main/java/org/ekatra/alfred/viewmodel/ChatViewModel.kt
+@@ -77,6 +77,8 @@ class ChatViewModel @Inject constructor(
+     companion object {
+         private const val TAG = "ChatViewModel"
+         private const val MODEL_CONTEXT_SIZE = 2048
++        // Must match LlamaEngine's contextSize minus its maxTokensPerResponse (512)
++        private const val PROMPT_TOKEN_BUDGET = MODEL_CONTEXT_SIZE - 512
+     }
+ 
+     private val _uiState = MutableStateFlow(ChatUiState())
+@@ -151,9 +153,11 @@ class ChatViewModel @Inject constructor(
+         }
+     }
+ 
++    // No engine.clearContext() here: every generation starts from an empty KV cache,
++    // and clearing from the main thread blocked on the native mutex during prefill.
+     fun createNewSession() {
++        if (_uiState.value.isGenerating) stopGeneration()
+         viewModelScope.launch {
+-            engine.clearContext() // S.2: flush KV cache for the new session
+             val id = chatRepository.createSession(_uiState.value.selectedSubject)
+             _uiState.update { it.copy(currentSessionId = id, streamingText = null, inputText = "") }
+             refreshContextUsage(id)
+@@ -161,7 +165,7 @@ class ChatViewModel @Inject constructor(
+     }
+ 
+     fun switchSession(sessionId: Long, subject: String?) {
+-        engine.clearContext() // S.2: flush KV cache when switching sessions
++        if (_uiState.value.isGenerating) stopGeneration()
+         _uiState.update {
+             it.copy(currentSessionId = sessionId, selectedSubject = subject, streamingText = null, inputText = "")
+         }
+@@ -239,7 +243,7 @@ class ChatViewModel @Inject constructor(
+             // Build context using remote config for context window size
+             val maxMessages = remoteConfig.maxContextMessages
+             // S.1: fetch turns as a list so PromptFormatter can emit proper chat-ML blocks
+-            val historyTurns = chatRepository.getConversationTurns(sessionId, maxMessages = maxMessages)
++            var historyTurns = chatRepository.getConversationTurns(sessionId, maxMessages = maxMessages)
+             val systemPrompt = persona.resolveSystemPrompt(remoteConfig.systemPrompt)
+ 
+             // Calculator intercept: if the message is a math expression,
+@@ -259,8 +263,15 @@ class ChatViewModel @Inject constructor(
+ 
+             // Format prompt with correct model-specific chat-ML template (S.1: multi-turn)
+             val modelId = settings.getSelectedModel().id
+-            val promptText = promptFormatter.format(modelId, systemPrompt, historyTurns, effectiveUserMsg)
+-            updateContextUsageFromPrompt(promptText)
++            var promptText = promptFormatter.format(modelId, systemPrompt, historyTurns, effectiveUserMsg)
++            // Drop the oldest turns until the prompt leaves room for a full response
++            var promptTokens = engine.countTokens(promptText)
++            while (promptTokens > PROMPT_TOKEN_BUDGET && historyTurns.isNotEmpty()) {
++                historyTurns = historyTurns.drop(if (historyTurns.size >= 2) 2 else 1)
++                promptText = promptFormatter.format(modelId, systemPrompt, historyTurns, effectiveUserMsg)
++                promptTokens = engine.countTokens(promptText)
++            }
++            updateContextUsage(promptTokens)
+ 
+             // Persist user message
+             chatRepository.addMessage(sessionId, userMsg, true)
+@@ -347,6 +358,10 @@ class ChatViewModel @Inject constructor(
+                     return@launch
+                 }
+                 throw e
++            } catch (e: Exception) {
++                // Engine failure (e.g. prompt too long): fall through to the fallback reply
++                Log.e(TAG, "Generation failed", e)
++                response.clear()
+             }
+ 
+             _uiState.update { it.copy(streamingText = null) }
+@@ -374,6 +389,8 @@ class ChatViewModel @Inject constructor(
+             _uiState.update { it.copy(isGenerating = false, firstTokenReceived = false, status = ChatStatus.READY) }
+         }.also { job ->
+             job.invokeOnCompletion { throwable ->
++                // A job stopped and replaced by a newer send must not reset the newer job's state
++                if (generationJob !== job) return@invokeOnCompletion
+                 generationJob = null
+                 if (throwable is CancellationException) {
+                     _uiState.update {
+@@ -474,9 +491,8 @@ class ChatViewModel @Inject constructor(
+         }
+     }
+ 
+-    private fun updateContextUsageFromPrompt(promptText: String) {
+-        val estimatedTokens = (promptText.length / 4f).roundToInt()
+-        val percent = ((estimatedTokens.toFloat() / MODEL_CONTEXT_SIZE) * 100f).roundToInt().coerceIn(0, 100)
++    private fun updateContextUsage(promptTokens: Int) {
++        val percent = ((promptTokens.toFloat() / MODEL_CONTEXT_SIZE) * 100f).roundToInt().coerceIn(0, 100)
+         _uiState.update {
+             it.copy(contextUsagePercent = percent)
+         }
+diff --git a/app/src/test/java/org/ekatra/alfred/viewmodel/ChatViewModelTest.kt b/app/src/test/java/org/ekatra/alfred/viewmodel/ChatViewModelTest.kt
+index 95bae69..7a0cd94 100644
+--- a/app/src/test/java/org/ekatra/alfred/viewmodel/ChatViewModelTest.kt
++++ b/app/src/test/java/org/ekatra/alfred/viewmodel/ChatViewModelTest.kt
+@@ -301,4 +301,73 @@ class ChatViewModelTest {
+         coVerify(exactly = 1) { chatRepository.addMessage(1L, "first", true, any()) }
+         coVerify(exactly = 0) { chatRepository.addMessage(1L, "second", true, any()) }
+     }
++
++    private fun TestScope.readySession() {
++        coEvery { engine.loadModel(any()) } returns true
++        viewModel.loadModel(mockk { every { exists() } returns true })
++        advanceUntilIdle()
++        coEvery { chatRepository.createSession(any()) } returns 1L
++        viewModel.createInitialSession()
++        advanceUntilIdle()
++        coEvery { chatRepository.getConversationContext(any(), any()) } returns ""
++    }
++
++    @Test
++    fun `sendMessage drops oldest turns until prompt fits token budget`() = runTest {
++        readySession()
++        coEvery { chatRepository.getConversationTurns(any(), any()) } returns listOf(
++            org.ekatra.alfred.data.model.ChatMessageEntity(id = 1, sessionId = 1, text = "OLDQ", isUser = true),
++            org.ekatra.alfred.data.model.ChatMessageEntity(id = 2, sessionId = 1, text = "OLDA", isUser = false),
++            org.ekatra.alfred.data.model.ChatMessageEntity(id = 3, sessionId = 1, text = "NEWQ", isUser = true),
++            org.ekatra.alfred.data.model.ChatMessageEntity(id = 4, sessionId = 1, text = "NEWA", isUser = false)
++        )
++        coEvery { engine.countTokens(any()) } answers { if (firstArg<String>().contains("OLDQ")) 5000 else 100 }
++        val prompt = slot<String>()
++        coEvery { engine.generateRaw(capture(prompt)) } returns flowOf("OK")
++
++        viewModel.sendMessage("q")
++        advanceUntilIdle()
++
++        assertFalse(prompt.captured.contains("OLDQ"))
++        assertFalse(prompt.captured.contains("OLDA"))
++        assertTrue(prompt.captured.contains("NEWQ"))
++    }
++
++    @Test
++    fun `sendMessage stores fallback reply when engine fails`() = runTest {
++        readySession()
++        coEvery { chatRepository.getConversationTurns(any(), any()) } returns emptyList()
++        coEvery { engine.generateRaw(any()) } returns flow { throw org.ekatra.alfred.InferenceException("Prompt preparation failed") }
++
++        viewModel.sendMessage("q")
++        advanceUntilIdle()
++
++        val fallback = ActivePersona.emptyResponseFallback("q")
++        coVerify { chatRepository.addMessage(1L, fallback, false, any()) }
++        coVerify(exactly = 0) { chatRepository.addMessage(1L, match { it.startsWith("[Error") }, false, any()) }
++        assertFalse(viewModel.uiState.value.isGenerating)
++    }
++
++    @Test
++    fun `createNewSession cancels running generation without touching native context`() = runTest {
++        readySession()
++        coEvery { chatRepository.getConversationTurns(any(), any()) } returns emptyList()
++        coEvery { engine.generateRaw(any()) } returns flow {
++            emit("Hello")
++            kotlinx.coroutines.delay(10_000)
++            emit(" there")
++        }
++        viewModel.sendMessage("q")
++        assertTrue(viewModel.uiState.value.isGenerating)
++
++        coEvery { chatRepository.createSession(any()) } returns 2L
++        viewModel.createNewSession()
++        advanceUntilIdle()
++
++        val state = viewModel.uiState.value
++        assertFalse(state.isGenerating)
++        assertNull(state.streamingText)
++        assertEquals(2L, state.currentSessionId)
++        verify(exactly = 0) { engine.clearContext() }
++    }
+ }
