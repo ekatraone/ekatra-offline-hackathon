@@ -4,6 +4,7 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseAuthRecentLoginRequiredException
 import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.tasks.await
+import org.ekatra.alfred.data.AppSettings
 import org.ekatra.alfred.data.local.UserProfileDao
 import org.ekatra.alfred.data.repository.ChatRepository
 import javax.inject.Inject
@@ -33,14 +34,16 @@ class FirebaseAccountRemote @Inject constructor(
     }
 }
 
-/** Local side of account deletion: chat history and the cached profile row. */
+/** Local side of account deletion: chat history, the cached profile row and cached settings. */
 class RoomAccountData @Inject constructor(
     private val chats: ChatRepository,
-    private val profiles: UserProfileDao
+    private val profiles: UserProfileDao,
+    private val settings: AppSettings
 ) : LocalAccountData {
 
     override suspend fun clear(uid: String) {
         chats.deleteAllSessions()
         profiles.deleteProfile(uid)
+        settings.clearAllExceptConsent()
     }
 }

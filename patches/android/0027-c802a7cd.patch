@@ -1,0 +1,22 @@
+diff --git a/app/src/main/java/org/ekatra/alfred/data/AppSettings.kt b/app/src/main/java/org/ekatra/alfred/data/AppSettings.kt
+index 39f741d..85480a4 100644
+--- a/app/src/main/java/org/ekatra/alfred/data/AppSettings.kt
++++ b/app/src/main/java/org/ekatra/alfred/data/AppSettings.kt
+@@ -113,6 +113,17 @@ class AppSettings(context: Context) {
+         prefs.edit().remove("$KEY_PARTIAL_PREFIX$modelId").apply()
+     }
+ 
++    /**
++     * Removes every cached setting except [KEY_CONSENT_SHOWN], so a user who deleted their
++     * account is not shown the consent screen again on the same device. The analytics and
++     * feedback choices are cleared too, so collection stays off until they choose again.
++     */
++    fun clearAllExceptConsent() {
++        val editor = prefs.edit()
++        prefs.all.keys.filter { it != KEY_CONSENT_SHOWN }.forEach { editor.remove(it) }
++        editor.apply()
++    }
++
+     // Analytics consent (GDPR / DPDP Act)
+     fun setAnalyticsConsent(consent: Boolean) {
+         prefs.edit()
