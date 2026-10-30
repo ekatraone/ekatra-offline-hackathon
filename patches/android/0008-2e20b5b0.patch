@@ -1,0 +1,13 @@
+diff --git a/app/src/main/java/org/ekatra/alfred/ui/chat/ChatMarkdown.kt b/app/src/main/java/org/ekatra/alfred/ui/chat/ChatMarkdown.kt
+index 8ce3420..ab769f5 100644
+--- a/app/src/main/java/org/ekatra/alfred/ui/chat/ChatMarkdown.kt
++++ b/app/src/main/java/org/ekatra/alfred/ui/chat/ChatMarkdown.kt
+@@ -24,7 +24,7 @@ private val MATH_SNIPPET_REGEX =
+ private fun stabilizeMathDirection(text: String): String {
+     return MATH_SNIPPET_REGEX.replace(text) { match ->
+         // Keep equation/fraction token order stable inside Arabic sentences.
+-        "⁦${match.value}⁩"
++        "\u2066${match.value}\u2069"
+     }
+ }
+ 
