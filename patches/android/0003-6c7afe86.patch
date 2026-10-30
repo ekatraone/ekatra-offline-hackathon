@@ -1,0 +1,54 @@
+diff --git a/app/src/main/java/org/ekatra/alfred/tools/PromptFormatter.kt b/app/src/main/java/org/ekatra/alfred/tools/PromptFormatter.kt
+index 4930f8e..7eefa31 100644
+--- a/app/src/main/java/org/ekatra/alfred/tools/PromptFormatter.kt
++++ b/app/src/main/java/org/ekatra/alfred/tools/PromptFormatter.kt
+@@ -43,6 +43,8 @@ class PromptFormatter {
+         // Gemma 4 changed turn markers; it must be matched before the Gemma 3 branch.
+         modelId.startsWith("gemma-4")   -> formatGemma4(system, historyTurns, userMessage)
+         modelId.startsWith("gemma")     -> formatGemma(system, historyTurns, userMessage)
++        // LFM2.5 uses ChatML (see lib/llama.cpp/models/templates/LFM2.5-Instruct.jinja)
++        modelId.startsWith("lfm")       -> formatQwen(system, historyTurns, userMessage)
+         else                            -> formatQwen(system, historyTurns, userMessage)
+     }
+ 
+@@ -130,7 +132,9 @@ class PromptFormatter {
+     }
+ 
+     // ---- Gemma 4 ----
+-    // Native system role; turns are <|turn>role ... <turn|>. Thinking stays off (no <|think|>).
++    // Native system role; turns are <|turn>role ... <turn|>. Thinking stays off (no <|think|>),
++    // and like the official gemma4.jinja the model turn opens with an empty thought channel.
++    // Without it the model may emit <|channel> first, which LlamaEngine treats as a stop.
+     private fun formatGemma4(
+         system: String,
+         history: List<ChatMessageEntity>,
+@@ -145,6 +149,7 @@ class PromptFormatter {
+         }
+         append("<|turn>user\n").append(userMessage).append("<turn|>\n")
+         append("<|turn>model\n")
++        append("<|channel>thought\n<channel|>")
+     }
+ 
+     // ---- Llama / TinyLlama ----
+diff --git a/app/src/test/java/org/ekatra/alfred/tools/PromptFormatterTest.kt b/app/src/test/java/org/ekatra/alfred/tools/PromptFormatterTest.kt
+index ce1fb2c..741391b 100644
+--- a/app/src/test/java/org/ekatra/alfred/tools/PromptFormatterTest.kt
++++ b/app/src/test/java/org/ekatra/alfred/tools/PromptFormatterTest.kt
+@@ -18,7 +18,7 @@ class PromptFormatterTest {
+     fun `gemma 4 uses turn markers with a native system turn`() {
+         val p = formatter.format("gemma-4-e2b-it", "SYS", history, "Q")
+         assertEquals(
+-            "<|turn>system\nSYS<turn|>\n<|turn>user\nhi<turn|>\n<|turn>model\nhello<turn|>\n<|turn>user\nQ<turn|>\n<|turn>model\n",
++            "<|turn>system\nSYS<turn|>\n<|turn>user\nhi<turn|>\n<|turn>model\nhello<turn|>\n<|turn>user\nQ<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+             p
+         )
+         assertFalse(p.contains("<start_of_turn>"))
+@@ -31,7 +31,7 @@ class PromptFormatterTest {
+     }
+ 
+     @Test
+-    fun `lfm falls through to chatml`() {
++    fun `lfm uses chatml`() {
+         val p = formatter.format("lfm2.5-1.2b-instruct", "SYS", emptyList(), "Q")
+         assertTrue(p.startsWith("<|im_start|>system\nSYS"))
+         assertTrue(p.endsWith("<|im_start|>assistant\n"))
