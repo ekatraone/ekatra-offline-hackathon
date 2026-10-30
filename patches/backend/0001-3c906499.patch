@@ -1,0 +1,49 @@
+diff --git a/apps/backend/src/lib/llm.ts b/apps/backend/src/lib/llm.ts
+index b51f76cf..f6f5990e 100644
+--- a/apps/backend/src/lib/llm.ts
++++ b/apps/backend/src/lib/llm.ts
+@@ -2,31 +2,40 @@
+  * Provider-agnostic chat entrypoint for AI features.
+  *
+  * Prefers Anthropic/Claude (AZURE_ANTHROPIC_API_KEY); falls back to
+- * Azure OpenAI (AZURE_OPENAI_*) when Claude is not configured. Both
+- * clients return an OpenAI-style completion, so callers read
++ * Azure OpenAI (AZURE_OPENAI_*) when Claude is not configured, then to the
++ * Meta Model API (MODEL_API_KEY). Pass `provider: 'meta'` to force Muse Spark.
++ * All clients return an OpenAI-style completion, so callers read
+  * `completion.choices[0].message.content` either way.
+  */
+ 
+ import { anthropicClient } from './anthropicClient.js';
+ import { azureOpenAI } from './azureOpenAI.js';
++import { metaModelClient } from './metaModelClient.js';
+ 
+ export interface LlmChatParams {
+   messages: Array<{ role: string; content: string }>;
+   temperature?: number;
+   maxTokens?: number;
+   model?: 'default' | 'mini';
++  provider?: 'meta';
+ }
+ 
+ export function llmAvailable(): boolean {
+-  return anthropicClient.isAvailable() || azureOpenAI.isAvailable();
++  return anthropicClient.isAvailable() || azureOpenAI.isAvailable() || metaModelClient.isAvailable();
+ }
+ 
+ export async function llmChat(params: LlmChatParams): Promise<any> {
++  if (params.provider === 'meta') {
++    return metaModelClient.createChatCompletion(params);
++  }
+   if (anthropicClient.isAvailable()) {
+     return anthropicClient.createChatCompletion(params);
+   }
+   if (azureOpenAI.isAvailable()) {
+     return azureOpenAI.createChatCompletion(params);
+   }
+-  throw new Error('No LLM configured — set AZURE_ANTHROPIC_API_KEY or AZURE_OPENAI_API_KEY');
++  if (metaModelClient.isAvailable()) {
++    return metaModelClient.createChatCompletion(params);
++  }
++  throw new Error('No LLM configured — set AZURE_ANTHROPIC_API_KEY, AZURE_OPENAI_API_KEY or MODEL_API_KEY');
+ }
