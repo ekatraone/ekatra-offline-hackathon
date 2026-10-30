@@ -1,0 +1,97 @@
+diff --git a/firebase/firestore.rules b/firebase/firestore.rules
+index 2a6736e..e30dcdc 100644
+--- a/firebase/firestore.rules
++++ b/firebase/firestore.rules
+@@ -1,40 +1,79 @@
+ rules_version = '2';
+ 
+-// Firestore Security Rules for Maya AI (org.ekatra.alfred)
+-// Upload to: Firebase Console → Firestore Database → Rules
++// Firestore Security Rules shared by Maya (org.ekatra.alfred) and Asmaa (org.ekatra.asmaa)
++// Deploy: firebase deploy --only firestore:rules -P <alias>
+ //
+ // Collections:
+ //   /users/{userId}                    — User profile (name, country, grade, etc.)
+ //   /users/{userId}/analytics/{docId}  — Per-session analytics (synced by SyncWorker)
+-//   /fcm_tokens/{tokenId}             — FCM push notification tokens (optional)
++//   /feedback/{anonId}/items/{itemId}  — Opt-in thumbs-down feedback (FeedbackUploader)
++//   /fcm_tokens/{tokenId}              — FCM push notification tokens (optional)
++//
++// Phase 2 of docs/AUDIT_AND_ROADMAP_2026-10.md moves these under /apps/{app}/.
+ 
+ service cloud.firestore {
+   match /databases/{database}/documents {
+ 
++    function signedInAs(uid) {
++      return request.auth != null && request.auth.uid == uid;
++    }
++
++    function isShortString(field, max) {
++      return !(field in request.resource.data)
++        || (request.resource.data[field] is string && request.resource.data[field].size() <= max);
++    }
++
+     // ==================== User Profiles ====================
+-    // Users can only read/write their own profile
+     match /users/{userId} {
+-      allow read, update, delete: if request.auth != null && request.auth.uid == userId;
+-      allow create: if request.auth != null && request.auth.uid == userId;
++      allow read, delete: if signedInAs(userId);
++      allow create, update: if signedInAs(userId)
++        && request.resource.data.keys().hasOnly([
++             'uid', 'name', 'phoneNumber', 'country', 'grade',
++             'preferredLanguage', 'createdAt', 'lastActiveAt', 'analyticsConsent'])
++        && request.resource.data.uid == userId
++        && isShortString('name', 100)
++        && isShortString('phoneNumber', 20)
++        && isShortString('country', 60)
++        && isShortString('grade', 30)
++        && isShortString('preferredLanguage', 10);
+ 
+-      // ==================== User Analytics ====================
+-      // Users can write their own analytics; only admins can read all
+       match /analytics/{docId} {
+-        allow read, write: if request.auth != null && request.auth.uid == userId;
++        allow read, delete: if signedInAs(userId);
++        allow create, update: if signedInAs(userId)
++          && request.resource.data.size() <= 30;
+       }
+     }
+ 
++    // ==================== Feedback (opt-in) ====================
++    // Create-only; nobody can read feedback from the client. Offline (non-Firebase)
++    // users can submit, so auth is not required. App Check enforcement is Phase 2.
++    match /feedback/{anonId}/items/{itemId} {
++      allow read, update, delete: if false;
++      allow create: if request.resource.data.keys().hasOnly([
++             'question', 'response', 'model_id', 'subject', 'session_id', 'message_id',
++             'rating', 'device_model', 'android_sdk', 'app_version', 'timestamp'])
++        && request.resource.data.rating == 'down'
++        && isShortString('question', 2000)
++        && isShortString('response', 8000)
++        && isShortString('model_id', 64)
++        && isShortString('subject', 64)
++        && isShortString('device_model', 64)
++        && isShortString('app_version', 32);
++    }
++
+     // ==================== FCM Tokens (optional) ====================
+-    // Any authenticated user can register their token
+-    // Only the token owner can delete it
++    // A token doc belongs to the user who created it and cannot change owner.
+     match /fcm_tokens/{tokenId} {
+-      allow create, update: if request.auth != null;
++      allow create: if request.auth != null
++        && request.resource.data.uid == request.auth.uid;
++      allow update: if request.auth != null
++        && resource.data.uid == request.auth.uid
++        && request.resource.data.uid == request.auth.uid;
+       allow read, delete: if request.auth != null
+         && resource.data.uid == request.auth.uid;
+     }
+ 
+     // ==================== Default Deny ====================
+-    // Everything else is denied by default
+     match /{document=**} {
+       allow read, write: if false;
+     }
