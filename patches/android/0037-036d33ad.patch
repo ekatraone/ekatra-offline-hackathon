@@ -1,0 +1,88 @@
+diff --git a/app/src/main/java/org/ekatra/alfred/PrivacyConsentActivity.kt b/app/src/main/java/org/ekatra/alfred/PrivacyConsentActivity.kt
+index c01f837..52a95ab 100644
+--- a/app/src/main/java/org/ekatra/alfred/PrivacyConsentActivity.kt
++++ b/app/src/main/java/org/ekatra/alfred/PrivacyConsentActivity.kt
+@@ -47,10 +47,12 @@ class PrivacyConsentActivity : ComponentActivity() {
+                     PrivacyConsentScreen(
+                         onAccept = { feedbackOptIn ->
+                             consentManager.record(collection = true, feedback = feedbackOptIn)
++                            setResult(RESULT_OK)
+                             finish()
+                         },
+                         onDecline = {
+                             consentManager.record(collection = false, feedback = false)
++                            setResult(RESULT_OK)
+                             finish()
+                         }
+                     )
+diff --git a/app/src/main/java/org/ekatra/alfred/ProfileActivity.kt b/app/src/main/java/org/ekatra/alfred/ProfileActivity.kt
+index ca6f123..f4e040a 100644
+--- a/app/src/main/java/org/ekatra/alfred/ProfileActivity.kt
++++ b/app/src/main/java/org/ekatra/alfred/ProfileActivity.kt
+@@ -27,7 +27,10 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
+ import androidx.compose.ui.text.style.TextAlign
+ import androidx.compose.ui.unit.dp
+ import androidx.compose.ui.unit.sp
++import androidx.activity.result.ActivityResultLauncher
++import androidx.activity.result.contract.ActivityResultContracts
+ import androidx.activity.viewModels
++import androidx.compose.runtime.saveable.rememberSaveable
+ import androidx.compose.ui.res.stringResource
+ import androidx.credentials.CredentialManager
+ import androidx.credentials.CustomCredential
+@@ -54,6 +57,11 @@ class ProfileActivity : ComponentActivity() {
+ 
+     private val viewModel: ProfileViewModel by viewModels()
+ 
++    private lateinit var consentLauncher: ActivityResultLauncher<Intent>
++
++    // Bumped when the consent screen returns, so the navigation decision is re-evaluated
++    private var consentRound by mutableIntStateOf(0)
++
+     companion object {
+         const val EXTRA_EDIT_PROFILE = "edit_profile"
+         private const val TAG = "ProfileActivity"
+@@ -62,9 +70,10 @@ class ProfileActivity : ComponentActivity() {
+     override fun onCreate(savedInstanceState: Bundle?) {
+         enableEdgeToEdge()
+         super.onCreate(savedInstanceState)
+-        // First launch: ask for data-collection consent before sign-in or any upload
+-        if (savedInstanceState == null && consentManager.needsPrompt()) {
+-            startActivity(Intent(this, PrivacyConsentActivity::class.java))
++        // The consent screen returns RESULT_OK once the user accepts or declines. Back or any
++        // other result leaves consent unrecorded: close the app so it is shown again next launch.
++        consentLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
++            if (result.resultCode == RESULT_OK) consentRound++ else finish()
+         }
+ 
+         val isEditMode = intent.getBooleanExtra(EXTRA_EDIT_PROFILE, false)
+@@ -88,11 +97,24 @@ class ProfileActivity : ComponentActivity() {
+                         }
+                     }
+ 
+-                    // Navigate when authenticated (only for login flow, not edit mode)
+-                    LaunchedEffect(uiState.authStep) {
+-                        if (uiState.authStep == AuthStep.AUTHENTICATED && !isEditMode) {
+-                            startActivity(Intent(this@ProfileActivity, ModelDownloadActivity::class.java))
+-                            finish()
++                    // Consent comes before any onward navigation, signed in or not (see profileAction)
++                    var consentRequested by rememberSaveable { mutableStateOf(false) }
++                    LaunchedEffect(uiState.authStep, consentRound) {
++                        val action = profileAction(
++                            needsConsent = consentManager.needsPrompt(),
++                            isAuthenticated = uiState.authStep == AuthStep.AUTHENTICATED,
++                            isEditMode = isEditMode
++                        )
++                        when (action) {
++                            ProfileAction.ASK_CONSENT -> if (!consentRequested) {
++                                consentRequested = true
++                                consentLauncher.launch(Intent(this@ProfileActivity, PrivacyConsentActivity::class.java))
++                            }
++                            ProfileAction.GO_ONWARD -> {
++                                startActivity(Intent(this@ProfileActivity, ModelDownloadActivity::class.java))
++                                finish()
++                            }
++                            ProfileAction.SHOW_SIGN_IN, ProfileAction.STAY -> Unit
+                         }
+                     }
+ 
