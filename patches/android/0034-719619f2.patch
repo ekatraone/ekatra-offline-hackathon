@@ -1,0 +1,59 @@
+diff --git a/app/src/asmaa/java/org/ekatra/alfred/persona/ActivePersona.kt b/app/src/asmaa/java/org/ekatra/alfred/persona/ActivePersona.kt
+index 48e4ba4..21d0b1b 100644
+--- a/app/src/asmaa/java/org/ekatra/alfred/persona/ActivePersona.kt
++++ b/app/src/asmaa/java/org/ekatra/alfred/persona/ActivePersona.kt
+@@ -169,7 +169,10 @@ object AsmaaPersona : Persona {
+         )
+     )
+     // Per the 2026-09 eval, the Arabic-tuned 0.5B model hallucinates science and grammar; keep it only as the floor.
+-    override val modelPreference = listOf("gemma-4-e2b-it", "lfm2.5-1.2b-instruct", "qwen2.5-0.5b-instruct-arabic")
++    // gemma-4-e2b-it is not auto-selected: on device every reply was cut at the "<channel|>" token
++    // (LlamaEngine stops on any token containing "|>"), so users saw only the thinking text, and
++    // it ran at 0.7-2.5 tok/s. Re-enabling it needs an engine fix and a device test first.
++    override val modelPreference = listOf("lfm2.5-1.2b-instruct", "qwen2.5-0.5b-instruct-arabic")
+ 
+     // Some shipped llama.cpp builds fail to load current Gemma 3 1B GGUF variants.
+     override val modelLoadFallbacks = mapOf("gemma-3-1b-it" to "qwen2.5-0.5b-instruct-arabic")
+diff --git a/app/src/maya/java/org/ekatra/alfred/persona/ActivePersona.kt b/app/src/maya/java/org/ekatra/alfred/persona/ActivePersona.kt
+index 6fb3322..dbbcf11 100644
+--- a/app/src/maya/java/org/ekatra/alfred/persona/ActivePersona.kt
++++ b/app/src/maya/java/org/ekatra/alfred/persona/ActivePersona.kt
+@@ -91,6 +91,9 @@ Rules:
+             minRamGB = 2
+         )
+     )
+-    override val modelPreference = listOf("gemma-4-e2b-it", "lfm2.5-1.2b-instruct", "gemma-3-1b-it")
++    // gemma-4-e2b-it is not auto-selected: on device every reply was cut at the "<channel|>" token
++    // (LlamaEngine stops on any token containing "|>"), so users saw only the thinking text, and
++    // it ran at 0.7-2.5 tok/s. Re-enabling it needs an engine fix and a device test first.
++    override val modelPreference = listOf("lfm2.5-1.2b-instruct", "gemma-3-1b-it")
+     override val modelLoadFallbacks = emptyMap<String, String>()
+ }
+diff --git a/app/src/test/java/org/ekatra/alfred/data/ModelTierTest.kt b/app/src/test/java/org/ekatra/alfred/data/ModelTierTest.kt
+index fb1d83f..30bb538 100644
+--- a/app/src/test/java/org/ekatra/alfred/data/ModelTierTest.kt
++++ b/app/src/test/java/org/ekatra/alfred/data/ModelTierTest.kt
+@@ -2,6 +2,8 @@ package org.ekatra.alfred.data
+ 
+ import org.ekatra.alfred.persona.ActivePersona
+ import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertNotEquals
+ import org.junit.Assert.assertNotNull
+ import org.junit.Test
+ 
+@@ -12,6 +14,14 @@ class ModelTierTest {
+         ActivePersona.modelPreference.forEach { assertNotNull(it, AvailableModels.getModelById(it)) }
+     }
+ 
++    @Test
++    fun `gemma-4-e2b-it is never auto-selected`() {
++        assertFalse("gemma-4-e2b-it" in ActivePersona.modelPreference)
++        listOf(1, 2, 4, 6, 8, 12).forEach {
++            assertNotEquals("gemma-4-e2b-it", AvailableModels.getDefaultModel(it).id)
++        }
++    }
++
+     @Test
+     fun `high-RAM phones get the top preference`() {
+         assertEquals(ActivePersona.modelPreference.first(), AvailableModels.getDefaultModel(8).id)
