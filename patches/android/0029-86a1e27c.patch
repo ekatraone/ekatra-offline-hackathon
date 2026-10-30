@@ -1,0 +1,160 @@
+diff --git a/app/src/main/java/org/ekatra/alfred/data/sync/SyncManager.kt b/app/src/main/java/org/ekatra/alfred/data/sync/SyncManager.kt
+index 9f6cb5e..b8512a7 100644
+--- a/app/src/main/java/org/ekatra/alfred/data/sync/SyncManager.kt
++++ b/app/src/main/java/org/ekatra/alfred/data/sync/SyncManager.kt
+@@ -10,6 +10,7 @@ import com.google.gson.Gson
+ import dagger.hilt.android.qualifiers.ApplicationContext
+ import kotlinx.coroutines.flow.Flow
+ import kotlinx.coroutines.tasks.await
++import org.ekatra.alfred.data.ConsentManager
+ import org.ekatra.alfred.data.local.SyncQueueDao
+ import org.ekatra.alfred.data.model.ChatAnalytics
+ import org.ekatra.alfred.data.model.SyncQueueItem
+@@ -20,13 +21,17 @@ import javax.inject.Singleton
+  * Offline-first sync manager.
+  * Queues analytics locally and batch-uploads to Firestore when online.
+  * Respects battery/data saver modes.
++ *
++ * Nothing is queued or uploaded unless the user accepted data collection
++ * ([ConsentManager.hasCollectionConsent]). SyncWorker only calls [syncPending], so it is covered.
+  */
+ @Singleton
+ class SyncManager @Inject constructor(
+     @ApplicationContext private val context: Context,
+     private val syncQueueDao: SyncQueueDao,
+     private val firestore: FirebaseFirestore,
+-    private val firebaseAuth: FirebaseAuth
++    private val firebaseAuth: FirebaseAuth,
++    private val consentManager: ConsentManager
+ ) {
+     companion object {
+         private const val TAG = "SyncManager"
+@@ -44,6 +49,10 @@ class SyncManager @Inject constructor(
+     }
+ 
+     suspend fun enqueueAnalytics(analytics: ChatAnalytics) {
++        if (!consentManager.hasCollectionConsent()) {
++            Log.d(TAG, "No collection consent, not queuing analytics")
++            return
++        }
+         val payload = gson.toJson(analytics)
+         syncQueueDao.insert(SyncQueueItem(type = "chat_analytics", payload = payload))
+         Log.d(TAG, "Enqueued analytics for session ${analytics.sessionId}")
+@@ -53,6 +62,10 @@ class SyncManager @Inject constructor(
+      * Process all pending sync items. Called by SyncWorker.
+      */
+     suspend fun syncPending() {
++        if (!consentManager.hasCollectionConsent()) {
++            Log.d(TAG, "No collection consent, skipping sync")
++            return
++        }
+         val uid = firebaseAuth.currentUser?.uid ?: return
+         if (!isOnline()) {
+             Log.d(TAG, "Offline — skipping sync")
+diff --git a/app/src/test/java/org/ekatra/alfred/data/SyncManagerTest.kt b/app/src/test/java/org/ekatra/alfred/data/SyncManagerTest.kt
+index e36f075..8553012 100644
+--- a/app/src/test/java/org/ekatra/alfred/data/SyncManagerTest.kt
++++ b/app/src/test/java/org/ekatra/alfred/data/SyncManagerTest.kt
+@@ -26,6 +26,7 @@ class SyncManagerTest {
+     private lateinit var syncQueueDao: SyncQueueDao
+     private lateinit var firestore: FirebaseFirestore
+     private lateinit var auth: FirebaseAuth
++    private lateinit var consent: ConsentManager
+     private lateinit var syncManager: SyncManager
+ 
+     @Before
+@@ -34,13 +35,15 @@ class SyncManagerTest {
+         syncQueueDao = mockk(relaxed = true)
+         firestore = mockk(relaxed = true)
+         auth = mockk(relaxed = true)
++        consent = mockk()
++        every { consent.hasCollectionConsent() } returns true
+ 
+         // Mock connectivity — offline by default
+         val connectivityManager = mockk<ConnectivityManager>()
+         every { context.getSystemService(Context.CONNECTIVITY_SERVICE) } returns connectivityManager
+         every { connectivityManager.activeNetwork } returns null
+ 
+-        syncManager = SyncManager(context, syncQueueDao, firestore, auth)
++        syncManager = SyncManager(context, syncQueueDao, firestore, auth, consent)
+     }
+ 
+     @Test
+@@ -94,9 +97,76 @@ class SyncManagerTest {
+         // But no auth
+         every { auth.currentUser } returns null
+ 
+-        syncManager = SyncManager(context, syncQueueDao, firestore, auth)
++        syncManager = SyncManager(context, syncQueueDao, firestore, auth, consent)
+         syncManager.syncPending()
+ 
+         coVerify(exactly = 0) { syncQueueDao.getPending(any()) }
+     }
++
++    private fun goOnline(uid: String) {
++        val connectivityManager = mockk<ConnectivityManager>()
++        val network = mockk<Network>()
++        val capabilities = mockk<NetworkCapabilities>()
++        every { context.getSystemService(Context.CONNECTIVITY_SERVICE) } returns connectivityManager
++        every { connectivityManager.activeNetwork } returns network
++        every { connectivityManager.getNetworkCapabilities(network) } returns capabilities
++        every { capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) } returns true
++        val user = mockk<FirebaseUser>()
++        every { user.uid } returns uid
++        every { auth.currentUser } returns user
++    }
++
++    private fun analytics(sessionId: String) = ChatAnalytics(
++        sessionId = sessionId, userId = "uid-1", startTime = 1000L, endTime = 2000L,
++        messageCount = 1, userMessageCount = 1, aiMessageCount = 0, subject = "Math",
++        modelId = "m", avgResponseTimeMs = 1L, deviceModel = "Pixel", gpuUsed = false,
++        savedCount = 0, sharedCount = 0, thumbsUpCount = 0, thumbsDownCount = 0
++    )
++
++    @Test
++    fun `enqueueAnalytics queues nothing without collection consent`() = runTest {
++        every { consent.hasCollectionConsent() } returns false
++
++        syncManager.enqueueAnalytics(analytics("session-1"))
++
++        coVerify(exactly = 0) { syncQueueDao.insert(any()) }
++    }
++
++    @Test
++    fun `syncPending uploads nothing without collection consent`() = runTest {
++        goOnline("uid-1")
++        every { consent.hasCollectionConsent() } returns false
++        coEvery { syncQueueDao.getPending(any()) } returns listOf(
++            SyncQueueItem(id = 1, type = "chat_analytics", payload = "{}")
++        )
++
++        syncManager.syncPending()
++
++        coVerify(exactly = 0) { syncQueueDao.getPending(any()) }
++        verify(exactly = 0) { firestore.collection(any()) }
++        coVerify(exactly = 0) { syncQueueDao.delete(any()) }
++    }
++
++    @Test
++    fun `syncPending uploads queued analytics with collection consent`() = runTest {
++        goOnline("uid-1")
++        val item = SyncQueueItem(
++            id = 1,
++            type = "chat_analytics",
++            payload = com.google.gson.Gson().toJson(analytics("session-1"))
++        )
++        coEvery { syncQueueDao.getPending(any()) } returns listOf(item)
++        every {
++            firestore.collection("users").document("uid-1").collection("analytics")
++                .document("session-1").set(any())
++        } returns Tasks.forResult(null)
++
++        syncManager.syncPending()
++
++        verify(exactly = 1) {
++            firestore.collection("users").document("uid-1").collection("analytics")
++                .document("session-1").set(any())
++        }
++        coVerify { syncQueueDao.delete(item) }
++    }
+ }
