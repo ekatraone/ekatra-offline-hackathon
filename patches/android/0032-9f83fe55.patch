@@ -1,0 +1,35 @@
+diff --git a/app/src/main/java/org/ekatra/alfred/ProfileActivity.kt b/app/src/main/java/org/ekatra/alfred/ProfileActivity.kt
+index 1e1695a..38563c8 100644
+--- a/app/src/main/java/org/ekatra/alfred/ProfileActivity.kt
++++ b/app/src/main/java/org/ekatra/alfred/ProfileActivity.kt
+@@ -41,14 +41,17 @@ import kotlinx.coroutines.launch
+ import org.ekatra.alfred.ui.BackButton
+ import org.ekatra.alfred.ui.PersonaDirection
+ import dagger.hilt.android.AndroidEntryPoint
+-import org.ekatra.alfred.data.AppSettings
++import org.ekatra.alfred.data.ConsentManager
+ import org.ekatra.alfred.viewmodel.AuthStep
+ import org.ekatra.alfred.viewmodel.ProfileViewModel
+ import java.io.File
++import javax.inject.Inject
+ 
+ @AndroidEntryPoint
+ class ProfileActivity : ComponentActivity() {
+ 
++    @Inject lateinit var consentManager: ConsentManager
++
+     private val viewModel: ProfileViewModel by viewModels()
+ 
+     companion object {
+@@ -59,10 +62,8 @@ class ProfileActivity : ComponentActivity() {
+     override fun onCreate(savedInstanceState: Bundle?) {
+         enableEdgeToEdge()
+         super.onCreate(savedInstanceState)
+-        val appSettings = AppSettings(this)
+-
+         // First launch: ask for data-collection consent before sign-in or any upload
+-        if (savedInstanceState == null && !appSettings.isConsentShown()) {
++        if (savedInstanceState == null && consentManager.needsPrompt()) {
+             startActivity(Intent(this, PrivacyConsentActivity::class.java))
+         }
+ 
