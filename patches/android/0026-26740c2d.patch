@@ -1,0 +1,65 @@
+diff --git a/app/src/main/java/org/ekatra/alfred/SettingsActivity.kt b/app/src/main/java/org/ekatra/alfred/SettingsActivity.kt
+index 0a71226..cba8837 100644
+--- a/app/src/main/java/org/ekatra/alfred/SettingsActivity.kt
++++ b/app/src/main/java/org/ekatra/alfred/SettingsActivity.kt
+@@ -29,7 +29,13 @@ import androidx.compose.ui.platform.LocalConfiguration
+ import androidx.compose.ui.text.font.FontWeight
+ import androidx.compose.ui.unit.dp
+ import androidx.compose.ui.unit.sp
++import androidx.credentials.CredentialManager
++import androidx.credentials.CustomCredential
++import androidx.credentials.GetCredentialRequest
++import androidx.credentials.exceptions.GetCredentialException
+ import androidx.hilt.navigation.compose.hiltViewModel
++import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
++import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
+ import dagger.hilt.android.AndroidEntryPoint
+ import org.ekatra.alfred.viewmodel.DeleteAccountViewModel
+ import org.ekatra.alfred.viewmodel.SettingsViewModel
+@@ -59,6 +65,12 @@ class SettingsActivity : ComponentActivity() {
+                         }
+                     }
+ 
++                    LaunchedEffect(deleteState.needsGoogleSignIn) {
++                        if (deleteState.needsGoogleSignIn) {
++                            deleteViewModel.submitGoogleIdToken(requestGoogleIdToken())
++                        }
++                    }
++
+                     DeleteAccountDialogs(
+                         state = deleteState,
+                         onConfirm = deleteViewModel::onConfirm,
+@@ -172,6 +184,24 @@ class SettingsActivity : ComponentActivity() {
+             }
+         }
+     }
++
++    /** Asks Credential Manager for a fresh Google ID token; null when cancelled or unavailable. */
++    private suspend fun requestGoogleIdToken(): String? {
++        val option = GetSignInWithGoogleOption.Builder(getString(R.string.default_web_client_id)).build()
++        val request = GetCredentialRequest.Builder().addCredentialOption(option).build()
++        return try {
++            val credential = CredentialManager.create(this).getCredential(this, request).credential
++            if (credential is CustomCredential &&
++                credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
++            ) {
++                GoogleIdTokenCredential.createFrom(credential.data).idToken
++            } else {
++                null
++            }
++        } catch (e: GetCredentialException) {
++            null
++        }
++    }
+ }
+ 
+ @Composable
+@@ -467,7 +497,7 @@ fun DeleteAccountDialogs(
+         )
+     }
+ 
+-    if (state.inProgress && !state.needsPassword) {
++    if (state.inProgress && !state.needsPassword && !state.needsGoogleSignIn) {
+         AlertDialog(
+             onDismissRequest = {},
+             confirmButton = {},

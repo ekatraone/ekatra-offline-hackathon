@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.google.firebase.auth.EmailAuthProvider
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.GoogleAuthProvider
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -21,7 +22,9 @@ import javax.inject.Inject
  *
  * The confirm button is the only path that starts deletion. Re-authentication is needed when
  * Firebase reports a recent sign-in. Email users are asked for their password. Google users
- * are not supported yet and fail with an error.
+ * sign in again: the screen sees [UiState.needsGoogleSignIn], gets a Google ID token from
+ * Credential Manager (which needs an Activity) and passes it to [submitGoogleIdToken]. Other
+ * providers fail with an error.
  */
 @HiltViewModel
 class DeleteAccountViewModel @Inject constructor(
@@ -33,6 +36,7 @@ class DeleteAccountViewModel @Inject constructor(
         val confirming: Boolean = false,
         val inProgress: Boolean = false,
         val needsPassword: Boolean = false,
+        val needsGoogleSignIn: Boolean = false,
         val failedStep: AccountDeleter.Step? = null,
         val deleted: Boolean = false
     )
@@ -41,6 +45,7 @@ class DeleteAccountViewModel @Inject constructor(
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
     private var passwordReply: CompletableDeferred<String?>? = null
+    private var googleReply: CompletableDeferred<String?>? = null
 
     /** Opens the confirmation dialog. Does not delete anything. */
     fun onDeleteRequested() {
@@ -49,7 +54,10 @@ class DeleteAccountViewModel @Inject constructor(
 
     fun onCancel() {
         passwordReply?.complete(null)
-        _uiState.update { it.copy(confirming = false, needsPassword = false, failedStep = null) }
+        googleReply?.complete(null)
+        _uiState.update {
+            it.copy(confirming = false, needsPassword = false, needsGoogleSignIn = false, failedStep = null)
+        }
     }
 
     /** Starts deletion. Called only from the confirm button. */
@@ -58,7 +66,7 @@ class DeleteAccountViewModel @Inject constructor(
         val uid = firebaseAuth.currentUser?.uid ?: return
         _uiState.update { it.copy(confirming = false, inProgress = true, failedStep = null) }
         viewModelScope.launch {
-            val result = deleter.delete(uid) { reauthenticateWithPassword() }
+            val result = deleter.delete(uid) { reauthenticate() }
             _uiState.update {
                 when (result) {
                     DeletionResult.Deleted -> it.copy(inProgress = false, deleted = true)
@@ -73,10 +81,40 @@ class DeleteAccountViewModel @Inject constructor(
         passwordReply?.complete(password)
     }
 
+    /** Called by the screen with the Google ID token, or null when sign-in was cancelled or failed. */
+    fun submitGoogleIdToken(idToken: String?) {
+        googleReply?.complete(idToken)
+    }
+
+    private suspend fun reauthenticate(): Boolean {
+        val providers = firebaseAuth.currentUser?.providerData?.map { it.providerId }.orEmpty()
+        return when {
+            EmailAuthProvider.PROVIDER_ID in providers -> reauthenticateWithPassword()
+            GoogleAuthProvider.PROVIDER_ID in providers -> reauthenticateWithGoogle()
+            else -> false
+        }
+    }
+
+    private suspend fun reauthenticateWithGoogle(): Boolean {
+        val user = firebaseAuth.currentUser ?: return false
+
+        val reply = CompletableDeferred<String?>()
+        googleReply = reply
+        _uiState.update { it.copy(needsGoogleSignIn = true) }
+        val idToken = reply.await()
+        _uiState.update { it.copy(needsGoogleSignIn = false) }
+        if (idToken.isNullOrEmpty()) return false
+
+        return try {
+            user.reauthenticate(GoogleAuthProvider.getCredential(idToken, null)).await()
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     private suspend fun reauthenticateWithPassword(): Boolean {
         val user = firebaseAuth.currentUser ?: return false
-        val isEmailUser = user.providerData.any { it.providerId == EmailAuthProvider.PROVIDER_ID }
-        if (!isEmailUser) return false
         val email = user.email ?: return false
 
         val reply = CompletableDeferred<String?>()
