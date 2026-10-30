@@ -1,0 +1,207 @@
+diff --git a/app/src/asmaa/res/values/strings.xml b/app/src/asmaa/res/values/strings.xml
+index 569546a..1caacca 100644
+--- a/app/src/asmaa/res/values/strings.xml
++++ b/app/src/asmaa/res/values/strings.xml
+@@ -83,6 +83,7 @@
+     <string name="worker_model_ready">النموذج جاهز!</string>
+     <string name="worker_download_failed">فشل التنزيل: %1$s</string>
+     <string name="worker_network_error">خطأ في الشبكة</string>
++    <string name="worker_storage_full">لا توجد مساحة تخزين كافية. حرّر حوالي %1$d ميغابايت ثم اضغط إعادة المحاولة.</string>
+     <string name="worker_downloading">جارٍ تنزيل عقل الذكاء الاصطناعي...</string>
+     <string name="worker_download_complete">اكتمل التنزيل!</string>
+ 
+diff --git a/app/src/main/java/org/ekatra/alfred/ModelDownloadActivity.kt b/app/src/main/java/org/ekatra/alfred/ModelDownloadActivity.kt
+index f85cbf3..5e7c995 100644
+--- a/app/src/main/java/org/ekatra/alfred/ModelDownloadActivity.kt
++++ b/app/src/main/java/org/ekatra/alfred/ModelDownloadActivity.kt
+@@ -149,7 +149,13 @@ class ModelDownloadActivity : ComponentActivity() {
+ 
+                     // If we are currently showing the verifying step before any work kicks in
+                     val displayProgress = if (isVerifying) 1f else (baseProgressPercent / 100f)
+-                    val displayStatus = if (isVerifying) stringResource(R.string.download_verifying) else statusFromWorker
++                    // A failed worker has no progress data; its reason (e.g. storage full) is in outputData
++                    val failureStatus = if (isFailed) workInfo?.outputData?.getString(ModelDownloadWorker.KEY_STATUS) else null
++                    val displayStatus = when {
++                        isVerifying -> stringResource(R.string.download_verifying)
++                        failureStatus != null && !isIntegrityError -> failureStatus
++                        else -> statusFromWorker
++                    }
+                 
+                     val downloadedMB = downloadedBytes / 1_000_000
+                     val totalMB = totalBytes / 1_000_000
+diff --git a/app/src/main/java/org/ekatra/alfred/data/AppSettings.kt b/app/src/main/java/org/ekatra/alfred/data/AppSettings.kt
+index e229633..39f741d 100644
+--- a/app/src/main/java/org/ekatra/alfred/data/AppSettings.kt
++++ b/app/src/main/java/org/ekatra/alfred/data/AppSettings.kt
+@@ -34,15 +34,17 @@ class AppSettings(context: Context) {
+      */
+     fun getSelectedModel(): ModelConfig {
+         val savedModelId = prefs.getString(KEY_SELECTED_MODEL_ID, null)
+-        return savedModelId?.let { AvailableModels.getModelById(it) }
+-            ?: AvailableModels.getDefaultModel(deviceRamGb)
++        savedModelId?.let { AvailableModels.getModelById(it) }?.let { return it }
++        // Persist the RAM-based pick so the model cannot change between launches
++        return AvailableModels.getDefaultModel(deviceRamGb).also { setSelectedModel(it.id) }
+     }
+ 
+-    // Rounded up: a "6 GB" phone reports ~5.5 GB total after kernel/firmware reservations.
++    // Rounded to nearest: a "6 GB" phone reports ~5.5 GB after kernel/firmware reservations,
++    // while rounding up let a 5.01 GB device into the 6 GB tier with no headroom.
+     private val deviceRamGb: Int by lazy {
+         val info = ActivityManager.MemoryInfo()
+         appContext.getSystemService(ActivityManager::class.java).getMemoryInfo(info)
+-        Math.ceil(info.totalMem / 1_000_000_000.0).toInt()
++        Math.round(info.totalMem / 1_000_000_000.0).toInt()
+     }
+     
+     /**
+@@ -106,16 +108,11 @@ class AppSettings(context: Context) {
+             .apply()
+     }
+ 
+-    fun savePartialDownload(modelId: String, bytes: Long) {
+-        prefs.edit().putLong("$KEY_PARTIAL_PREFIX$modelId", bytes).apply()
+-    }
+-
++    // Resume offsets now come from the .tmp file; this clears values older builds saved
+     fun clearPartialDownload(modelId: String) {
+         prefs.edit().remove("$KEY_PARTIAL_PREFIX$modelId").apply()
+     }
+ 
+-    fun getPartialDownload(modelId: String): Long = prefs.getLong("$KEY_PARTIAL_PREFIX$modelId", 0L)
+-
+     // Analytics consent (GDPR / DPDP Act)
+     fun setAnalyticsConsent(consent: Boolean) {
+         prefs.edit()
+diff --git a/app/src/main/java/org/ekatra/alfred/worker/ModelDownloadWorker.kt b/app/src/main/java/org/ekatra/alfred/worker/ModelDownloadWorker.kt
+index 4a6fd25..a886361 100644
+--- a/app/src/main/java/org/ekatra/alfred/worker/ModelDownloadWorker.kt
++++ b/app/src/main/java/org/ekatra/alfred/worker/ModelDownloadWorker.kt
+@@ -5,6 +5,7 @@ import android.app.NotificationManager
+ import android.content.Context
+ import android.content.pm.ServiceInfo
+ import android.os.Build
++import android.os.StatFs
+ import android.util.Log
+ import androidx.core.app.NotificationCompat
+ import androidx.hilt.work.HiltWorker
+@@ -16,6 +17,7 @@ import org.ekatra.alfred.data.AvailableModels
+ import org.ekatra.alfred.data.AppSettings
+ import java.io.File
+ import java.io.FileOutputStream
++import java.io.IOException
+ import java.net.HttpURLConnection
+ import java.net.URL
+ import java.security.MessageDigest
+@@ -52,6 +54,8 @@ class ModelDownloadWorker @AssistedInject constructor(
+         // Error type values
+         const val ERROR_NETWORK = "network"
+         const val ERROR_INTEGRITY = "integrity"
++        const val ERROR_STORAGE = "storage"
++        private const val STORAGE_MARGIN_BYTES = 200_000_000L
+ 
+         /**
+          * Enqueue a model download that continues in the background.
+@@ -135,10 +139,15 @@ class ModelDownloadWorker @AssistedInject constructor(
+             modelFile.delete()
+         }
+ 
+-        // Resume support
+-        var resumeBytes = tempFile.takeIf { it.exists() }?.length() ?: 0L
+-        if (resumeBytes == 0L) {
+-            resumeBytes = settings.getPartialDownload(modelId)
++        // Resume from the bytes actually on disk; a saved offset with an empty temp
++        // file appended a range onto nothing and then failed the integrity check
++        val resumeBytes = tempFile.takeIf { it.exists() }?.length() ?: 0L
++
++        val neededBytes = (remoteSize ?: ((modelConfig?.sizeInMB ?: 0L) * 1_000_000L)) - resumeBytes + STORAGE_MARGIN_BYTES
++        val freeBytes = StatFs(modelDir.path).availableBytes
++        if (freeBytes < neededBytes) {
++            Log.e(TAG, "Not enough storage: free=$freeBytes needed=$neededBytes")
++            return storageFailure(neededBytes - freeBytes)
+         }
+ 
+         // Create notification channel
+@@ -162,18 +171,39 @@ class ModelDownloadWorker @AssistedInject constructor(
+                 KEY_STATUS to "integrity_failed",
+                 KEY_ERROR_TYPE to ERROR_INTEGRITY
+             ))
++        } catch (e: IOException) {
++            if (isOutOfSpace(e)) {
++                // Retrying cannot help until the user frees space; keep the temp file for resume
++                Log.e(TAG, "Storage full during download", e)
++                return storageFailure(STORAGE_MARGIN_BYTES)
++            }
++            networkRetry(e)
+         } catch (e: Exception) {
+-            Log.e(TAG, "Download failed (will retry)", e)
+-            // Don't delete temp file — allow resume on retry
+-            setProgress(workDataOf(
+-                KEY_PROGRESS to -1,
+-                KEY_STATUS to context.getString(R.string.worker_download_failed, e.message?.take(50) ?: context.getString(R.string.worker_network_error)),
+-                KEY_ERROR_TYPE to ERROR_NETWORK
+-            ))
+-            Result.retry()
++            networkRetry(e)
+         }
+     }
+ 
++    private fun isOutOfSpace(e: IOException): Boolean {
++        val msg = e.message.orEmpty()
++        return msg.contains("ENOSPC") || msg.contains("No space left", ignoreCase = true)
++    }
++
++    private fun storageFailure(shortBytes: Long): Result {
++        val status = context.getString(R.string.worker_storage_full, (shortBytes / 1_000_000L).toInt() + 1)
++        return Result.failure(workDataOf(KEY_STATUS to status, KEY_ERROR_TYPE to ERROR_STORAGE))
++    }
++
++    private suspend fun networkRetry(e: Exception): Result {
++        Log.e(TAG, "Download failed (will retry)", e)
++        // Don't delete temp file — allow resume on retry
++        setProgress(workDataOf(
++            KEY_PROGRESS to -1,
++            KEY_STATUS to context.getString(R.string.worker_download_failed, e.message?.take(50) ?: context.getString(R.string.worker_network_error)),
++            KEY_ERROR_TYPE to ERROR_NETWORK
++        ))
++        return Result.retry()
++    }
++
+     private suspend fun downloadWithProgress(
+         modelUrl: String,
+         tempFile: File,
+@@ -220,7 +250,13 @@ class ModelDownloadWorker @AssistedInject constructor(
+             resumeBytes
+         }
+ 
+-        val fileSize = connection.contentLengthLong.takeIf { it > 0 } ?: remoteSize ?: 0L
++        // On 206 the Content-Length covers only the remaining range
++        val contentLength = connection.contentLengthLong.takeIf { it > 0 }
++        val fileSize = when {
++            contentLength != null && responseCode == HttpURLConnection.HTTP_PARTIAL -> effectiveResumeBytes + contentLength
++            contentLength != null -> contentLength
++            else -> remoteSize ?: 0L
++        }
+         var downloaded = effectiveResumeBytes
+ 
+         connection.inputStream.use { input ->
+@@ -232,7 +268,6 @@ class ModelDownloadWorker @AssistedInject constructor(
+                 while (input.read(buffer).also { bytesRead = it } != -1) {
+                     output.write(buffer, 0, bytesRead)
+                     downloaded += bytesRead
+-                    settings.savePartialDownload(modelId, downloaded)
+ 
+                     // Update progress every 500KB
+                     if (downloaded - lastProgressUpdate > 500_000) {
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 1f52859..49f94aa 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -84,6 +84,7 @@
+     <string name="worker_model_ready">Model ready!</string>
+     <string name="worker_download_failed">Download failed: %1$s</string>
+     <string name="worker_network_error">Network error</string>
++    <string name="worker_storage_full">Not enough storage. Free about %1$d MB and tap Retry.</string>
+     <string name="worker_downloading">Downloading AI brain...</string>
+     <string name="worker_download_complete">Download complete!</string>
+ 
