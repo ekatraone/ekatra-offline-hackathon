@@ -1,0 +1,26 @@
+diff --git a/app/src/asmaa/res/values/strings.xml b/app/src/asmaa/res/values/strings.xml
+index 1edfe8f..ddaf805 100644
+--- a/app/src/asmaa/res/values/strings.xml
++++ b/app/src/asmaa/res/values/strings.xml
+@@ -72,7 +72,7 @@
+     <string name="privacy_right_export">صدّر جميع بياناتك في أي وقت من الإعدادات</string>
+     <string name="privacy_right_delete">احذف جميع بياناتك السحابية في أي وقت من الإعدادات</string>
+     <string name="privacy_right_offline">يعمل التطبيق بالكامل دون إنترنت إذا رفضت</string>
+-    <string name="privacy_right_change">يمكنك تغيير هذا الاختيار لاحقًا من الإعدادات</string>
++    <string name="privacy_right_change">يمكنك الرفض الآن ومواصلة استخدام التطبيق، أو حذف حسابك وبياناتك السحابية لاحقًا من الإعدادات &gt; البيانات والخصوصية</string>
+     <string name="privacy_compliance">متوافق مع قانون حماية البيانات الشخصية الرقمية في الهند (DPDP) واللائحة الأوروبية (GDPR).</string>
+     <string name="privacy_feedback_title">ساعدنا في تحسين الإجابات (اختياري)</string>
+     <string name="privacy_feedback_body">عند الضغط على عدم الإعجاب، سنسألك إن كنت تريد إرسال السؤال والإجابة لفريق أسماء لتحسين الجودة. بدون بيانات شخصية.</string>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 9a89431..768e80c 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -73,7 +73,7 @@
+     <string name="privacy_right_export">Export all your data anytime from Settings</string>
+     <string name="privacy_right_delete">Delete all cloud data anytime from Settings</string>
+     <string name="privacy_right_offline">The app works fully offline if you decline</string>
+-    <string name="privacy_right_change">You can change this choice later in Settings</string>
++    <string name="privacy_right_change">You can decline now and keep using the app, or delete your account and cloud data later in Settings &gt; Data &amp; Privacy</string>
+     <string name="privacy_compliance">Compliant with India\'s DPDP Act and GDPR.</string>
+     <string name="privacy_feedback_title">Help fix bad answers (optional)</string>
+     <string name="privacy_feedback_body">When you tap thumbs-down, we\'ll ask if you want to send that question + answer to the Maya team to help fix it. No personal info.</string>
