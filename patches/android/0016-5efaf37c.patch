@@ -1,0 +1,20 @@
+diff --git a/app/src/maya/java/org/ekatra/alfred/persona/ActivePersona.kt b/app/src/maya/java/org/ekatra/alfred/persona/ActivePersona.kt
+index 145a8cc..6fb3322 100644
+--- a/app/src/maya/java/org/ekatra/alfred/persona/ActivePersona.kt
++++ b/app/src/maya/java/org/ekatra/alfred/persona/ActivePersona.kt
+@@ -24,8 +24,13 @@ Rules:
+ - Use **bold** for key terms
+ - Write fractions and equations as plain text like 3/4. Never use LaTeX or $ signs."""
+ 
+-    override fun resolveSystemPrompt(remotePrompt: String): String =
+-        remotePrompt.ifBlank { defaultSystemPrompt }
++    override fun resolveSystemPrompt(remotePrompt: String): String {
++        if (remotePrompt.isBlank()) return defaultSystemPrompt
++        // Remote Config is shared across apps; a prompt written for Asmaa must not leak into Maya.
++        val forAsmaa = remotePrompt.contains("asmaa", ignoreCase = true) ||
++            remotePrompt.any { it in '\u0600'..'\u06FF' }
++        return if (forAsmaa) defaultSystemPrompt else remotePrompt
++    }
+ 
+     override val userTurnPreamble = ""
+ 
