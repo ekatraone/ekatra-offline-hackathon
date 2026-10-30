@@ -1,0 +1,87 @@
+diff --git a/app/src/asmaa/java/org/ekatra/alfred/persona/ActivePersona.kt b/app/src/asmaa/java/org/ekatra/alfred/persona/ActivePersona.kt
+index 55b642f..48e4ba4 100644
+--- a/app/src/asmaa/java/org/ekatra/alfred/persona/ActivePersona.kt
++++ b/app/src/asmaa/java/org/ekatra/alfred/persona/ActivePersona.kt
+@@ -51,13 +51,13 @@ object AsmaaPersona : Persona {
+     override val userTurnPreamble = "$RESPONSE_GUARD\n$TEACHING_GUARD\n"
+ 
+     override fun subjectInstruction(subject: String?): String = when (subject?.lowercase()) {
+-        "math", "رياضيات" -> "/think\nالوضع: معلم رياضيات. اعرض الحل بخطوات مرقمة، ثم اكتب: النتيجة النهائية = ..."
+-        "science", "علوم" -> "/think\nالوضع: معلم علوم. اشرح: ما هو؟ كيف يحدث؟ ولماذا هو مهم؟ ثم مثال واقعي قصير."
++        "math", "رياضيات" -> "الوضع: معلم رياضيات. اعرض الحل بخطوات مرقمة، ثم اكتب: النتيجة النهائية = ..."
++        "science", "علوم" -> "الوضع: معلم علوم. اشرح: ما هو؟ كيف يحدث؟ ولماذا هو مهم؟ ثم مثال واقعي قصير."
+         "english", "إنجليزي", "لغة إنجليزية", "languages", "لغات", "عربي", "لغة عربية" ->
+-            "/no_think\nالوضع: معلم لغات يركز على تعلم العربية. اشرح بالعربية، وصحح بلطف، وقدّم ترجمة إنجليزية قصيرة فقط عند الحاجة."
+-        "history", "تاريخ" -> "/no_think\nالوضع: مدرس تاريخ. حافظ على التسلسل الزمني بنقاط قصيرة."
+-        "geography", "جغرافيا" -> "/no_think\nالوضع: مدرس جغرافيا. استخدم أمثلة محلية ووصفا بسيطا للخريطة بالكلمات."
+-        "coding", "برمجة" -> "/think\nالوضع: مدرس برمجة. أعط أمثلة قصيرة واشرح كل خطوة بوضوح."
++            "الوضع: معلم لغات يركز على تعلم العربية. اشرح بالعربية، وصحح بلطف، وقدّم ترجمة إنجليزية قصيرة فقط عند الحاجة."
++        "history", "تاريخ" -> "الوضع: مدرس تاريخ. حافظ على التسلسل الزمني بنقاط قصيرة."
++        "geography", "جغرافيا" -> "الوضع: مدرس جغرافيا. استخدم أمثلة محلية ووصفا بسيطا للخريطة بالكلمات."
++        "coding", "برمجة" -> "الوضع: مدرس برمجة. أعط أمثلة قصيرة واشرح كل خطوة بوضوح."
+         else -> ""
+     }
+ 
+diff --git a/app/src/main/cpp/llama_jni.cpp b/app/src/main/cpp/llama_jni.cpp
+index deaa4a7..2b25d4d 100644
+--- a/app/src/main/cpp/llama_jni.cpp
++++ b/app/src/main/cpp/llama_jni.cpp
+@@ -197,10 +197,13 @@ Java_org_ekatra_alfred_LlamaEngine_nativeLoadModel(
+     // Create sampler chain
+     auto sparams = llama_sampler_chain_default_params();
+     g_sampler = llama_sampler_chain_init(sparams);
++    // Mild repeat penalty over the last 64 tokens: 1B-class models otherwise loop on a
++    // phrase until the 512-token cap. Random seed so a retried question can differ.
++    llama_sampler_chain_add(g_sampler, llama_sampler_init_penalties(64, 1.1f, 0.0f, 0.0f));
+     llama_sampler_chain_add(g_sampler, llama_sampler_init_temp(0.7f));
+     llama_sampler_chain_add(g_sampler, llama_sampler_init_top_k(40));
+     llama_sampler_chain_add(g_sampler, llama_sampler_init_top_p(0.9f, 1));
+-    llama_sampler_chain_add(g_sampler, llama_sampler_init_dist(42));
++    llama_sampler_chain_add(g_sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
+     
+     LOGI("Model loaded! Vocab: %d, Ctx: %d", 
+          llama_vocab_n_tokens(llama_model_get_vocab(g_model)), llama_n_ctx(g_ctx));
+@@ -227,6 +230,7 @@ Java_org_ekatra_alfred_LlamaEngine_nativePrepare(
+     // Appending to the previous turn's cache duplicated history and overflowed n_ctx.
+     llama_memory_clear(llama_get_memory(g_ctx), true);
+     reset_generation_state();
++    if (g_sampler) llama_sampler_reset(g_sampler); // penalty history is per reply
+ 
+     // Tokenize prompt
+     auto tokens = tokenize(g_model, prompt, true);
+diff --git a/app/src/main/java/org/ekatra/alfred/viewmodel/ChatViewModel.kt b/app/src/main/java/org/ekatra/alfred/viewmodel/ChatViewModel.kt
+index 5990058..c227b1b 100644
+--- a/app/src/main/java/org/ekatra/alfred/viewmodel/ChatViewModel.kt
++++ b/app/src/main/java/org/ekatra/alfred/viewmodel/ChatViewModel.kt
+@@ -498,6 +498,7 @@ class ChatViewModel @Inject constructor(
+         }
+     }
+ 
+-    // S.13: personas emit /think for reasoning-heavy subjects and /no_think for language/casual ones.
++    // Plain-text subject mode lines; the old /think and /no_think switches only work on Qwen3,
++    // which no shipped model is, so they reached Gemma and LFM as stray text.
+     private fun subjectInstruction(subject: String?): String = persona.subjectInstruction(subject)
+ }
+diff --git a/app/src/maya/java/org/ekatra/alfred/persona/ActivePersona.kt b/app/src/maya/java/org/ekatra/alfred/persona/ActivePersona.kt
+index 6d5367c..145a8cc 100644
+--- a/app/src/maya/java/org/ekatra/alfred/persona/ActivePersona.kt
++++ b/app/src/maya/java/org/ekatra/alfred/persona/ActivePersona.kt
+@@ -30,12 +30,12 @@ Rules:
+     override val userTurnPreamble = ""
+ 
+     override fun subjectInstruction(subject: String?): String = when (subject?.lowercase()) {
+-        "math" -> "/think\nMode: Math tutor. Show step-by-step reasoning and end with one final answer line."
+-        "science" -> "/think\nMode: Science tutor. Explain with one daily-life example from a village or home context."
+-        "english" -> "/no_think\nMode: English tutor. Correct grammar gently and explain one rule used."
+-        "history" -> "/no_think\nMode: History tutor. Keep chronology clear with short timelines."
+-        "geography" -> "/no_think\nMode: Geography tutor. Use simple maps-in-words and local examples."
+-        "coding" -> "/think\nMode: Coding tutor. Prefer short code snippets and explain each step simply."
++        "math" -> "Mode: Math tutor. Show step-by-step reasoning and end with one final answer line."
++        "science" -> "Mode: Science tutor. Explain with one daily-life example from a village or home context."
++        "english" -> "Mode: English tutor. Correct grammar gently and explain one rule used."
++        "history" -> "Mode: History tutor. Keep chronology clear with short timelines."
++        "geography" -> "Mode: Geography tutor. Use simple maps-in-words and local examples."
++        "coding" -> "Mode: Coding tutor. Prefer short code snippets and explain each step simply."
+         else -> ""
+     }
+ 
