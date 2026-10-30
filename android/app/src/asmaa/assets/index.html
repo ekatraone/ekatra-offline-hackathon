@@ -466,7 +466,7 @@
             <div class="messages" id="messages">
                 <div class="welcome">
                     <h2>👋 أهلاً بك في إكترا!</h2>
-                    <p>أنا أسماء، رفيقتك للتعلم بالعربية.<br>يمكنني مساعدتك في اللغات والرياضيات والعلوم بشرح مبسّط.</p>
+                    <p>أنا أسماء، رفيقتك للتعلم بالعربية.<br>يمكنني مساعدتك في اللغات والرياضيات والعلوم بشرح مبسّط.<br><small>تُحفظ محادثاتك على هاتف المضيف.</small></p>
                 </div>
             </div>
         </div>
@@ -554,6 +554,8 @@
         let serverRunning = false;
         let useRemoteServer = !isAndroid(); // Auto-detect: remote if not in Android WebView
         let remoteServerUrl = window.location.origin; // Auto-use current server URL
+        // Host key from the QR code URL (?k=...); the server rejects requests without it
+        let remoteKey = new URLSearchParams(window.location.search).get('k') || '';
         let remoteSessionId = null;
         let lastSendAt = 0;
         let callbackCounter = 0;
@@ -654,7 +656,7 @@
 
                 const response = await fetch(remoteServerUrl + '/api/chat', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 'Content-Type': 'application/json', 'X-Ekatra-Key': remoteKey },
                     body: JSON.stringify(payload)
                 });
                 
@@ -834,12 +836,19 @@
                 return;
             }
             
-            remoteServerUrl = url;
+            try {
+                const parsed = new URL(url);
+                remoteServerUrl = parsed.origin;
+                remoteKey = parsed.searchParams.get('k') || '';
+            } catch (e) {
+                alert('Please enter the full address shown on the host phone');
+                return;
+            }
             useRemoteServer = true;
             remoteSessionId = null;
             
             // Test connection
-            fetch(url + '/status')
+            fetch(remoteServerUrl + '/status', { headers: { 'X-Ekatra-Key': remoteKey } })
                 .then(r => r.json())
                 .then(data => {
                     if (data.modelLoaded) {
@@ -875,7 +884,7 @@
                 }
             } else {
                 // Remote client mode - check server status
-                fetch('/status')
+                fetch('/status', { headers: { 'X-Ekatra-Key': remoteKey } })
                     .then(r => r.json())
                     .then(data => {
                         if (data.modelLoaded) {

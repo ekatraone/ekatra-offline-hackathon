@@ -1,0 +1,204 @@
+diff --git a/app/src/main/java/org/ekatra/alfred/AlfredServer.kt b/app/src/main/java/org/ekatra/alfred/AlfredServer.kt
+index ff83f7e..3004ac4 100644
+--- a/app/src/main/java/org/ekatra/alfred/AlfredServer.kt
++++ b/app/src/main/java/org/ekatra/alfred/AlfredServer.kt
+@@ -9,7 +9,9 @@ import kotlinx.coroutines.*
+ import kotlinx.coroutines.flow.collect
+ import kotlinx.coroutines.sync.Mutex
+ import kotlinx.coroutines.sync.withLock
++import org.ekatra.alfred.data.AppSettings
+ import org.ekatra.alfred.data.repository.ChatRepository
++import org.ekatra.alfred.tools.PromptFormatter
+ import java.net.InetAddress
+ import java.net.NetworkInterface
+ 
+@@ -30,10 +32,16 @@ class AlfredServer(
+     companion object {
+         private const val TAG = "AlfredServer"
+         private const val MAX_SESSION_HISTORY = 6   // per-session message pairs to keep
++        private const val PROMPT_TOKEN_BUDGET = 2048 - 512 // LlamaEngine context minus max response
+     }
+     
+     private val gson = Gson()
+     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
++    val access = HostAccess()
++    private val settings = AppSettings(context)
++    private val promptFormatter = PromptFormatter()
++    // One request generating plus a short queue; further chat requests get 503
++    private val chatSlots = java.util.concurrent.Semaphore(3)
+     private val sessionMutex = Mutex()
+ 
+     // ========== Session Memory (Room-backed) ==========
+@@ -61,10 +69,6 @@ class AlfredServer(
+         clientId to roomId
+     }
+ 
+-    /** Fetch last N turns from Room as formatted history text. */
+-    private suspend fun getSessionHistory(roomSessionId: Long): String =
+-        chatRepository.getConversationContext(roomSessionId, maxMessages = MAX_SESSION_HISTORY)
+-
+     /** Persist a turn to Room. */
+     private suspend fun persistTurn(roomSessionId: Long, studentMsg: String, mayaReply: String) {
+         chatRepository.addMessage(roomSessionId, studentMsg, isUser = true)
+@@ -101,19 +105,11 @@ class AlfredServer(
+         val method = session.method
+         
+         Log.d(TAG, "Request: $method $uri")
+-        
+-        // CORS headers for browser clients
+-        val corsHeaders = mapOf(
+-            "Access-Control-Allow-Origin" to "*",
+-            "Access-Control-Allow-Methods" to "GET, POST, OPTIONS",
+-            "Access-Control-Allow-Headers" to "Content-Type"
+-        )
+-        
+-        // Handle preflight
+-        if (method == Method.OPTIONS) {
+-            return newFixedLengthResponse(Response.Status.OK, "text/plain", "").apply {
+-                corsHeaders.forEach { (k, v) -> addHeader(k, v) }
+-            }
++
++        // No CORS headers: the web UI is served from this origin, and a wildcard
++        // origin let any page in a student's browser call the API.
++        if (!access.isAuthorized(session.headers, session.parameters)) {
++            return newFixedLengthResponse(Response.Status.FORBIDDEN, "application/json", """{"error": "Forbidden"}""")
+         }
+         
+         val response = when {
+@@ -142,7 +138,6 @@ class AlfredServer(
+         }
+         
+         // Add CORS headers to response
+-        corsHeaders.forEach { (k, v) -> response.addHeader(k, v) }
+         return response
+     }
+     
+@@ -162,6 +157,10 @@ class AlfredServer(
+     }
+     
+     private fun handleChat(session: IHTTPSession): Response {
++        access.bodySizeError(session.headers)?.let { return errorResponse(it, Response.Status.BAD_REQUEST) }
++        if (!chatSlots.tryAcquire()) {
++            return errorResponse("Server busy, try again shortly", Response.Status.SERVICE_UNAVAILABLE)
++        }
+         return try {
+             // Read body
+             val bodyMap = mutableMapOf<String, String>()
+@@ -175,11 +174,13 @@ class AlfredServer(
+             
+             if (message.isBlank()) {
+                 Log.w(TAG, "Empty message received")
+-                return errorResponse("Empty message")
++                return errorResponse("Empty message", Response.Status.BAD_REQUEST)
++            }
++            if (message.length > HostAccess.MAX_MESSAGE_CHARS) {
++                return errorResponse("Message too long", Response.Status.BAD_REQUEST)
+             }
+             
+-            val nameTag = if (studentName.isNotBlank()) " [student=$studentName]" else ""
+-            Log.d(TAG, "Chat request$nameTag: '${message.take(50)}...' modelLoaded=${engine.isLoaded()}")
++            Log.d(TAG, "Chat request (${message.length} chars, named=${studentName.isNotBlank()}) modelLoaded=${engine.isLoaded()}")
+             
+             // isLoaded: a busy model queues on inferenceMutex instead of rejecting
+             if (!engine.isLoaded()) {
+@@ -193,26 +194,19 @@ class AlfredServer(
+                     // Session management: get/create Room-backed session
+                     val (clientId, roomId) = getOrCreateSession(requestedSessionId)
+ 
+-                    // Fetch persisted conversation history from Room
+-                    val history = getSessionHistory(roomId)
+-
+-                    // Build prompt with conversation history for multi-turn memory
+-                    val promptWithHistory = buildString {
+-                        appendLine(ActivePersona.defaultSystemPrompt)
+-                        appendLine()
+-                        if (history.isNotBlank()) {
+-                            appendLine(ActivePersona.conversationHistoryHeader)
+-                            appendLine(history)
+-                            appendLine()
+-                        }
+-                        appendLine("${ActivePersona.studentLabel}: $message")
+-                        append("${ActivePersona.assistantName}: ")
++                    // Same model-specific chat template and token budget as the chat UI;
++                    // a plain "Student:/Assistant:" prompt made newer models invent turns
++                    val modelId = settings.getSelectedModel().id
++                    val system = ActivePersona.defaultSystemPrompt
++                    var turns = chatRepository.getConversationTurns(roomId, maxMessages = MAX_SESSION_HISTORY)
++                    var promptWithHistory = promptFormatter.format(modelId, system, turns, message)
++                    while (engine.countTokens(promptWithHistory) > PROMPT_TOKEN_BUDGET && turns.isNotEmpty()) {
++                        turns = turns.drop(if (turns.size >= 2) 2 else 1)
++                        promptWithHistory = promptFormatter.format(modelId, system, turns, message)
+                     }
+ 
+-                    // Clear KV cache before each generation (history is in the prompt text)
++                    // generateRaw starts from an empty KV cache; history is in the prompt
+                     val generated = inferenceMutex.withLock {
+-                        engine.clearContext()
+-
+                         Log.d(TAG, "Starting generation for session=$clientId (room=$roomId)...")
+                         val builder = StringBuilder()
+                         engine.generateRaw(promptWithHistory).collect { token ->
+@@ -243,7 +237,10 @@ class AlfredServer(
+             
+         } catch (e: Exception) {
+             Log.e(TAG, "Chat error", e)
+-            errorResponse(e.message ?: "Unknown error")
++            // Exception text stays in the log; LAN clients get a generic message
++            errorResponse("Server error")
++        } finally {
++            chatSlots.release()
+         }
+     }
+     
+@@ -266,7 +263,7 @@ class AlfredServer(
+                 else -> ""
+             }
+         } catch (e: Exception) {
+-            Log.e(TAG, "Parse error: $body", e)
++            Log.e(TAG, "Parse error (${body.length} chars)", e)
+             ""
+         }
+     }
+@@ -285,14 +282,17 @@ class AlfredServer(
+         } catch (e: Exception) { null }
+     }
+     
+-    private fun errorResponse(message: String): Response {
++    private fun errorResponse(
++        message: String,
++        status: Response.Status = Response.Status.INTERNAL_ERROR
++    ): Response {
+         val response = ChatResponse(
+             response = "",
+             success = false,
+             error = message
+         )
+         return newFixedLengthResponse(
+-            Response.Status.INTERNAL_ERROR,
++            status,
+             "application/json",
+             gson.toJson(response)
+         )
+@@ -300,7 +300,7 @@ class AlfredServer(
+     
+     fun getServerUrl(): String {
+         val ip = getLocalIpAddress() ?: "localhost"
+-        return "http://$ip:$listeningPort"
++        return "http://$ip:$listeningPort/?${HostAccess.PARAM}=${access.key}"
+     }
+     
+     private fun getLocalIpAddress(): String? {
+diff --git a/app/src/main/java/org/ekatra/alfred/AlfredServerService.kt b/app/src/main/java/org/ekatra/alfred/AlfredServerService.kt
+index 23e5629..9fdd953 100644
+--- a/app/src/main/java/org/ekatra/alfred/AlfredServerService.kt
++++ b/app/src/main/java/org/ekatra/alfred/AlfredServerService.kt
+@@ -70,7 +70,8 @@ class AlfredServerService : Service() {
+             startServerIfNeeded(app)
+         }
+         
+-        return START_STICKY
++        // Not sticky: the LAN server should not silently come back after the process is killed
++        return START_NOT_STICKY
+     }
+ 
+     private fun applyRemoteConfigPrompt() {
