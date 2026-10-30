@@ -1,0 +1,101 @@
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index e2038d5..e1d680f 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -14,10 +14,15 @@ import com.android.build.api.dsl.ApkSigningConfig
+ import java.time.Instant
+ import java.time.format.DateTimeFormatter
+ 
+-// Version configuration - Update these for each release
+-val versionMajor = 1
+-val versionMinor = 1
+-val versionPatch = 2
++// Version configuration, per persona: each app ships on its own Play listing and
++// release cadence. versionCode = major*10000 + minor*100 + patch (99 patches per minor)
++// and must exceed the live code on that app's listing.
++data class AppVersion(val major: Int, val minor: Int, val patch: Int) {
++    val code get() = major * 10000 + minor * 100 + patch
++    val name get() = "$major.$minor.$patch"
++}
++val mayaVersion = AppVersion(1, 2, 0)   // shipped maya was 1.1.2 (10102)
++val asmaaVersion = AppVersion(1, 2, 0)
+ val versionBuild = 1  // Increment for each build
+ 
+ // Configures a persona's release signingConfig, tolerant of a missing keystore/env
+@@ -28,8 +33,11 @@ fun configurePersonaSigning(
+     keystoreFileName: String,
+     alias: String
+ ) {
++    // A release task for this persona, or a flavor-less one (e.g. bundleRelease builds all)
+     val isReleaseTask = gradle.startParameter.taskNames.any {
+-        it.contains("Release", ignoreCase = true) && it.contains(persona, ignoreCase = true)
++        val task = it.lowercase()
++        task.contains("release") &&
++            (task.contains(persona) || (!task.contains("asmaa") && !task.contains("maya")))
+     }
+ 
+     val keystoreFile = file("../../keystore/$keystoreFileName")
+@@ -62,7 +70,7 @@ ksp {
+ 
+ android {
+     namespace = "org.ekatra.alfred"
+-    compileSdk = 35
++    compileSdk = 36
+     ndkVersion = "26.1.10909125"
+ 
+     sourceSets {
+@@ -71,12 +79,8 @@ android {
+ 
+     defaultConfig {
+         minSdk = 24
+-        targetSdk = 35
+-        
+-        // versionCode must be incremented for each Play Store upload
+-        // Formula: major*10000 + minor*100 + patch (allows 99 patches per minor)
+-        versionCode = versionMajor * 10000 + versionMinor * 100 + versionPatch
+-        versionName = "$versionMajor.$versionMinor.$versionPatch"
++        targetSdk = 36
++        // versionCode/versionName are set per persona flavor below
+         
+         // Build metadata
+         val buildTime = DateTimeFormatter.ISO_INSTANT.format(Instant.now())
+@@ -120,11 +124,15 @@ android {
+         create("asmaa") {
+             dimension = "persona"
+             applicationId = "org.ekatra.asmaa"
++            versionCode = asmaaVersion.code
++            versionName = asmaaVersion.name
+             signingConfig = signingConfigs.getByName("asmaa")
+         }
+         create("maya") {
+             dimension = "persona"
+             applicationId = "org.ekatra.alfred"
++            versionCode = mayaVersion.code
++            versionName = mayaVersion.name
+             signingConfig = signingConfigs.getByName("maya")
+         }
+     }
+diff --git a/build.gradle.kts b/build.gradle.kts
+index 752101d..d752887 100644
+--- a/build.gradle.kts
++++ b/build.gradle.kts
+@@ -1,6 +1,6 @@
+ // Top-level build file
+ plugins {
+-    id("com.android.application") version "8.7.3" apply false
++    id("com.android.application") version "8.9.1" apply false
+     id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+     id("org.jetbrains.kotlin.plugin.compose") version "2.0.21" apply false
+     id("com.google.devtools.ksp") version "2.0.21-1.0.28" apply false
+diff --git a/gradle/wrapper/gradle-wrapper.properties b/gradle/wrapper/gradle-wrapper.properties
+index 19cfad9..7a85060 100644
+--- a/gradle/wrapper/gradle-wrapper.properties
++++ b/gradle/wrapper/gradle-wrapper.properties
+@@ -1,5 +1,6 @@
+ distributionBase=GRADLE_USER_HOME
+ distributionPath=wrapper/dists
+-distributionUrl=https\://services.gradle.org/distributions/gradle-8.9-bin.zip
++distributionUrl=https\://services.gradle.org/distributions/gradle-8.11.1-bin.zip
+ zipStoreBase=GRADLE_USER_HOME
+ zipStorePath=wrapper/dists
++distributionSha256Sum=f397b287023acdba1e9f6fc5ea72d22dd63669d59ed4a289a29b1a76eee151c6
