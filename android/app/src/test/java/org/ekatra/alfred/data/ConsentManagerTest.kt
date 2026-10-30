@@ -5,6 +5,8 @@ import com.google.firebase.crashlytics.FirebaseCrashlytics
 import com.google.firebase.perf.FirebasePerformance
 import io.mockk.*
 import org.junit.After
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -52,5 +54,17 @@ class ConsentManagerTest {
         every { settings.hasAnalyticsConsent() } returns false
         consent.applyStored()
         verify { analytics.setAnalyticsCollectionEnabled(false) }
+    }
+
+    @Test
+    fun `needsPrompt is true when consent_shown is absent`() {
+        every { settings.isConsentShown() } returns false
+        assertTrue(consent.needsPrompt())
+    }
+
+    @Test
+    fun `needsPrompt is false when consent_shown is present`() {
+        every { settings.isConsentShown() } returns true
+        assertFalse(consent.needsPrompt())
     }
 }

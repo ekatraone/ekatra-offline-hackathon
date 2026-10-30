@@ -1,0 +1,50 @@
+diff --git a/app/src/asmaa/res/values/strings.xml b/app/src/asmaa/res/values/strings.xml
+index 70d789a..d18b462 100644
+--- a/app/src/asmaa/res/values/strings.xml
++++ b/app/src/asmaa/res/values/strings.xml
+@@ -42,6 +42,20 @@
+     <string name="save_changes">حفظ التغييرات</string>
+ 
+     <!-- Privacy consent -->
++    <!-- Data categories listed on the consent screen, and the code that writes each one.
++         Update this list whenever the strings below or the writers change. Paths are under
++         app/src/main/java/org/ekatra/alfred/.
++         Profile (name, country, grade; the email stays in Firebase Auth):
++           viewmodel/ProfileViewModel.kt:411 sets users/{uid} in Firestore, only when signed in
++           and ConsentManager.hasCollectionConsent() is true.
++         Analytics (session statistics, subject, model, device model, country and grade):
++           viewmodel/AnalyticsHelper.kt:19-103 logEvent calls (device model at :22), user
++           properties at :110-116. The SDK is switched on or off at data/ConsentManager.kt:35.
++         Feedback (question and answer text, opt-in, anonymous ID):
++           data/FeedbackUploader.kt:67 adds the document (fields built from :51), gated by the
++           feedback choice stored at data/ConsentManager.kt:27.
++         Crash reports and performance traces (only when consent is granted):
++           data/ConsentManager.kt:36 (Crashlytics) and :37 (Performance Monitoring). -->
+     <string name="privacy_title">خصوصيتك تهمنا</string>
+     <string name="privacy_we_collect">ما الذي نجمعه:</string>
+     <string name="privacy_collect_stats">إحصاءات جلسات المحادثة (عدد الرسائل وأوقات الاستجابة)</string>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index b8695fe..6e38642 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -43,6 +43,20 @@
+     <string name="save_changes">Save Changes</string>
+ 
+     <!-- Privacy consent -->
++    <!-- Data categories listed on the consent screen, and the code that writes each one.
++         Update this list whenever the strings below or the writers change. Paths are under
++         app/src/main/java/org/ekatra/alfred/.
++         Profile (name, country, grade; the email stays in Firebase Auth):
++           viewmodel/ProfileViewModel.kt:411 sets users/{uid} in Firestore, only when signed in
++           and ConsentManager.hasCollectionConsent() is true.
++         Analytics (session statistics, subject, model, device model, country and grade):
++           viewmodel/AnalyticsHelper.kt:19-103 logEvent calls (device model at :22), user
++           properties at :110-116. The SDK is switched on or off at data/ConsentManager.kt:35.
++         Feedback (question and answer text, opt-in, anonymous ID):
++           data/FeedbackUploader.kt:67 adds the document (fields built from :51), gated by the
++           feedback choice stored at data/ConsentManager.kt:27.
++         Crash reports and performance traces (only when consent is granted):
++           data/ConsentManager.kt:36 (Crashlytics) and :37 (Performance Monitoring). -->
+     <string name="privacy_title">Your Privacy Matters</string>
+     <string name="privacy_we_collect">What we collect:</string>
+     <string name="privacy_collect_stats">Chat session statistics (message counts, response times)</string>
