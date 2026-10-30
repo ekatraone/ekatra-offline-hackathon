@@ -1,5 +1,7 @@
 package org.ekatra.alfred.data.account
 
+import javax.inject.Inject
+
 /**
  * Runs the account deletion sequence (milestone 2, criteria 1, 2 and 4).
  *
@@ -9,7 +11,7 @@ package org.ekatra.alfred.data.account
  * FCM tokens are not written to Firestore (see EkatraMessagingService), so there is nothing
  * to delete for them and no step covers them. Feedback is anonymous and is not deleted here.
  */
-class AccountDeleter(
+class AccountDeleter @Inject constructor(
     private val remote: AccountRemote,
     private val local: LocalAccountData
 ) {
