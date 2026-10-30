@@ -1,0 +1,231 @@
+diff --git a/app/src/asmaa/res/values/strings.xml b/app/src/asmaa/res/values/strings.xml
+index b47fbde..569546a 100644
+--- a/app/src/asmaa/res/values/strings.xml
++++ b/app/src/asmaa/res/values/strings.xml
+@@ -48,6 +48,8 @@
+     <string name="privacy_collect_subjects">تفضيلات المواد وأنماط الاستخدام</string>
+     <string name="privacy_collect_device">طراز الجهاز لتحسين الأداء</string>
+     <string name="privacy_collect_crashes">تقارير الأعطال لإصلاح المشكلات</string>
++    <string name="privacy_collect_profile">عند تسجيل الدخول: اسمك وبريدك الإلكتروني وبلدك وصفك الدراسي، لمزامنة ملفك الشخصي</string>
++    <string name="privacy_minor_notice">إذا كان عمرك أقل من 18 عامًا، يُرجى قراءة هذا مع أحد الوالدين أو ولي الأمر قبل الموافقة.</string>
+     <string name="privacy_we_dont_collect">ما الذي لا نجمعه:</string>
+     <string name="privacy_no_messages">رسائلك أو أسئلتك الفعلية</string>
+     <string name="privacy_no_personal">الصور أو جهات الاتصال أو الملفات الشخصية</string>
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 1f3d6c4..ed05c78 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -98,6 +98,17 @@
+             android:name="com.google.firebase.messaging.default_notification_icon"
+             android:resource="@mipmap/ic_launcher" />
+ 
++        <!-- No data collection before consent; ConsentManager enables these on accept -->
++        <meta-data
++            android:name="firebase_analytics_collection_enabled"
++            android:value="false" />
++        <meta-data
++            android:name="firebase_crashlytics_collection_enabled"
++            android:value="false" />
++        <meta-data
++            android:name="firebase_performance_collection_enabled"
++            android:value="false" />
++
+         <!-- FileProvider for secure sharing of exported ZIP files -->
+         <provider
+             android:name="androidx.core.content.FileProvider"
+diff --git a/app/src/main/java/org/ekatra/alfred/EkatraApp.kt b/app/src/main/java/org/ekatra/alfred/EkatraApp.kt
+index 38c601f..b35c6d8 100644
+--- a/app/src/main/java/org/ekatra/alfred/EkatraApp.kt
++++ b/app/src/main/java/org/ekatra/alfred/EkatraApp.kt
+@@ -6,6 +6,7 @@ import androidx.hilt.work.HiltWorkerFactory
+ import androidx.work.Configuration
+ import com.google.firebase.messaging.FirebaseMessaging
+ import dagger.hilt.android.HiltAndroidApp
++import org.ekatra.alfred.data.ConsentManager
+ import org.ekatra.alfred.data.RemoteConfigManager
+ import org.ekatra.alfred.data.sync.SyncWorker
+ import org.ekatra.alfred.notification.EkatraMessagingService
+@@ -23,6 +24,7 @@ class EkatraApp : Application(), Configuration.Provider {
+ 
+     @Inject lateinit var workerFactory: HiltWorkerFactory
+     @Inject lateinit var remoteConfigManager: RemoteConfigManager
++    @Inject lateinit var consentManager: ConsentManager
+     
+     // Keep for AlfredServerService access
+     var alfredServer: AlfredServer? = null
+@@ -30,6 +32,9 @@ class EkatraApp : Application(), Configuration.Provider {
+     override fun onCreate() {
+         super.onCreate()
+         Log.d(TAG, "${getString(R.string.app_name)} v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) starting...")
++
++        // Collection is off in the manifest; re-apply the stored consent choice
++        consentManager.applyStored()
+         
+         // Create notification channels for FCM push notifications
+         EkatraMessagingService.createNotificationChannels(this)
+diff --git a/app/src/main/java/org/ekatra/alfred/PrivacyConsentActivity.kt b/app/src/main/java/org/ekatra/alfred/PrivacyConsentActivity.kt
+index 9a4c15e..c01f837 100644
+--- a/app/src/main/java/org/ekatra/alfred/PrivacyConsentActivity.kt
++++ b/app/src/main/java/org/ekatra/alfred/PrivacyConsentActivity.kt
+@@ -21,7 +21,7 @@ import androidx.compose.ui.text.font.FontWeight
+ import androidx.compose.ui.unit.dp
+ import androidx.compose.ui.unit.sp
+ import dagger.hilt.android.AndroidEntryPoint
+-import org.ekatra.alfred.data.AppSettings
++import org.ekatra.alfred.data.ConsentManager
+ import javax.inject.Inject
+ 
+ /**
+@@ -31,7 +31,7 @@ import javax.inject.Inject
+ @AndroidEntryPoint
+ class PrivacyConsentActivity : ComponentActivity() {
+ 
+-    @Inject lateinit var settings: AppSettings
++    @Inject lateinit var consentManager: ConsentManager
+ 
+     override fun onCreate(savedInstanceState: Bundle?) {
+         enableEdgeToEdge()
+@@ -46,13 +46,11 @@ class PrivacyConsentActivity : ComponentActivity() {
+                 ) {
+                     PrivacyConsentScreen(
+                         onAccept = { feedbackOptIn ->
+-                            settings.setAnalyticsConsent(true)
+-                            settings.setFeedbackConsent(feedbackOptIn)
++                            consentManager.record(collection = true, feedback = feedbackOptIn)
+                             finish()
+                         },
+                         onDecline = {
+-                            settings.setAnalyticsConsent(false)
+-                            settings.setFeedbackConsent(false)
++                            consentManager.record(collection = false, feedback = false)
+                             finish()
+                         }
+                     )
+@@ -77,7 +75,13 @@ fun PrivacyConsentScreen(onAccept: (Boolean) -> Unit, onDecline: () -> Unit) {
+         Text("🔒", fontSize = 48.sp)
+         Spacer(Modifier.height(16.dp))
+         Text(stringResource(R.string.privacy_title), fontSize = 24.sp, fontWeight = FontWeight.Bold)
+-        Spacer(Modifier.height(24.dp))
++        Spacer(Modifier.height(8.dp))
++        Text(
++            stringResource(R.string.privacy_minor_notice),
++            fontSize = 14.sp,
++            color = Color(0xFF374151)
++        )
++        Spacer(Modifier.height(16.dp))
+ 
+         Surface(
+             modifier = Modifier
+@@ -97,6 +101,7 @@ fun PrivacyConsentScreen(onAccept: (Boolean) -> Unit, onDecline: () -> Unit) {
+                 BulletPoint(stringResource(R.string.privacy_collect_subjects))
+                 BulletPoint(stringResource(R.string.privacy_collect_device))
+                 BulletPoint(stringResource(R.string.privacy_collect_crashes))
++                BulletPoint(stringResource(R.string.privacy_collect_profile))
+ 
+                 Spacer(Modifier.height(16.dp))
+                 Text(stringResource(R.string.privacy_we_dont_collect), fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+diff --git a/app/src/main/java/org/ekatra/alfred/ProfileActivity.kt b/app/src/main/java/org/ekatra/alfred/ProfileActivity.kt
+index 377f8d2..1e1695a 100644
+--- a/app/src/main/java/org/ekatra/alfred/ProfileActivity.kt
++++ b/app/src/main/java/org/ekatra/alfred/ProfileActivity.kt
+@@ -61,6 +61,11 @@ class ProfileActivity : ComponentActivity() {
+         super.onCreate(savedInstanceState)
+         val appSettings = AppSettings(this)
+ 
++        // First launch: ask for data-collection consent before sign-in or any upload
++        if (savedInstanceState == null && !appSettings.isConsentShown()) {
++            startActivity(Intent(this, PrivacyConsentActivity::class.java))
++        }
++
+         val isEditMode = intent.getBooleanExtra(EXTRA_EDIT_PROFILE, false)
+ 
+         setContent {
+diff --git a/app/src/main/java/org/ekatra/alfred/viewmodel/AnalyticsHelper.kt b/app/src/main/java/org/ekatra/alfred/viewmodel/AnalyticsHelper.kt
+index dcf1191..c89f456 100644
+--- a/app/src/main/java/org/ekatra/alfred/viewmodel/AnalyticsHelper.kt
++++ b/app/src/main/java/org/ekatra/alfred/viewmodel/AnalyticsHelper.kt
+@@ -106,8 +106,8 @@ class AnalyticsHelper @Inject constructor(
+         })
+     }
+ 
++    // No setUserId: events stay unlinked from the Firebase account (users are often minors)
+     fun setUserProperties(profile: UserProfile) {
+-        analytics.setUserId(profile.uid)
+         analytics.setUserProperty("country", profile.country)
+         analytics.setUserProperty("grade", profile.grade)
+     }
+diff --git a/app/src/main/java/org/ekatra/alfred/viewmodel/ProfileViewModel.kt b/app/src/main/java/org/ekatra/alfred/viewmodel/ProfileViewModel.kt
+index 32c07c2..30afdb3 100644
+--- a/app/src/main/java/org/ekatra/alfred/viewmodel/ProfileViewModel.kt
++++ b/app/src/main/java/org/ekatra/alfred/viewmodel/ProfileViewModel.kt
+@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.update
+ import kotlinx.coroutines.launch
+ import kotlinx.coroutines.tasks.await
+ import kotlinx.coroutines.withTimeoutOrNull
++import org.ekatra.alfred.data.ConsentManager
+ import org.ekatra.alfred.data.local.UserProfileDao
+ import org.ekatra.alfred.data.local.EkatraDatabase
+ import org.ekatra.alfred.data.model.UserProfile
+@@ -52,7 +53,8 @@ class ProfileViewModel @Inject constructor(
+     private val firestore: FirebaseFirestore,
+     private val userProfileDao: UserProfileDao,
+     private val database: EkatraDatabase,
+-    private val analyticsHelper: AnalyticsHelper
++    private val analyticsHelper: AnalyticsHelper,
++    private val consentManager: ConsentManager
+ ) : ViewModel() {
+ 
+     companion object {
+@@ -404,14 +406,14 @@ class ProfileViewModel @Inject constructor(
+             // Save locally
+             userProfileDao.upsert(profile)
+ 
+-            // Sync to Firestore (fire-and-forget — don't block the UI)
+-            if (firebaseAuth.currentUser != null) {
++            // Sync to Firestore (fire-and-forget — don't block the UI), only with consent
++            if (firebaseAuth.currentUser != null && consentManager.hasCollectionConsent()) {
+                 firestore.collection("users").document(uid).set(profile)
+                     .addOnFailureListener { e ->
+                         Log.w(TAG, "Firestore sync failed (will retry later)", e)
+                     }
+             } else {
+-                Log.d(TAG, "Offline-only mode, skipping Firestore sync")
++                Log.d(TAG, "Offline-only mode or no consent, skipping Firestore sync")
+             }
+ 
+             // Set analytics user properties
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 17c66d7..1f52859 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -49,6 +49,8 @@
+     <string name="privacy_collect_subjects">Subject preferences and usage patterns</string>
+     <string name="privacy_collect_device">Device model for performance optimization</string>
+     <string name="privacy_collect_crashes">Crash reports to fix bugs</string>
++    <string name="privacy_collect_profile">If you sign in: your name, email, country and grade, to sync your profile</string>
++    <string name="privacy_minor_notice">If you are under 18, please read this with a parent or guardian before accepting.</string>
+     <string name="privacy_we_dont_collect">What we DON\'T collect:</string>
+     <string name="privacy_no_messages">Your actual chat messages or questions</string>
+     <string name="privacy_no_personal">Personal photos, contacts, or files</string>
+diff --git a/app/src/test/java/org/ekatra/alfred/viewmodel/AnalyticsHelperTest.kt b/app/src/test/java/org/ekatra/alfred/viewmodel/AnalyticsHelperTest.kt
+index 8bdf1fc..f1b5ac8 100644
+--- a/app/src/test/java/org/ekatra/alfred/viewmodel/AnalyticsHelperTest.kt
++++ b/app/src/test/java/org/ekatra/alfred/viewmodel/AnalyticsHelperTest.kt
+@@ -106,15 +106,15 @@ class AnalyticsHelperTest {
+     }
+ 
+     @Test
+-    fun `setUserProperties calls setUserId and setUserProperty`() {
++    fun `setUserProperties sets properties without linking the user id`() {
+         val profile = UserProfile(uid = "uid-123", country = "India", grade = "10th")
+         analyticsHelper.setUserProperties(profile)
+ 
+         verify {
+-            firebaseAnalytics.setUserId("uid-123")
+             firebaseAnalytics.setUserProperty("country", "India")
+             firebaseAnalytics.setUserProperty("grade", "10th")
+         }
++        verify(exactly = 0) { firebaseAnalytics.setUserId(any()) }
+     }
+ 
+     @Test
