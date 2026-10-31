@@ -5,14 +5,14 @@
  * POST /api/auth/whatsapp/verify  { phone, code }  → { firebaseCustomToken } (uid "wa:<digits>")
  *
  * The client then calls FirebaseAuth.signInWithCustomToken and exchanges the resulting ID token at
- * POST /api/sync/auth/exchange. Both routes answer 503 when Firebase (exactly auth_not_configured) or a code provider is not
+ * POST /api/sync/auth/exchange. Both routes answer 503 when Firebase (auth_not_configured, or auth_unavailable when the key is set but unusable) or a code provider is not
  * configured. Codes are never logged here; only the mock sender (non-production) prints one.
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
 import rateLimit from 'express-rate-limit';
 import { logger } from '../lib/logger.js';
-import { AUTH_NOT_CONFIGURED, FirebaseAuthLike, getFirebaseAuth } from '../lib/firebaseAdmin.js';
+import { FirebaseAuthLike, firebaseUnavailableBody, getFirebaseAuth } from '../lib/firebaseAdmin.js';
 import { E164_RE, phoneDigits } from '../services/learnerIdentity.js';
 import { CODE_TTL_SECONDS, OtpDb, OtpProvider, RESEND_AFTER_SECONDS, selectOtpProvider } from '../services/whatsappOtp.js';
 import { OtpLimits } from '../services/otpLimits.js';
@@ -42,7 +42,7 @@ export function createWhatsappAuthRouter({ otp, firebase, limits }: WhatsappAuth
   // Neither route does anything (or burns a code) unless sign-in is fully configured.
   const configured = (_req: Request, res: Response, next: NextFunction) => {
     if (!firebase()) {
-      res.status(503).json(AUTH_NOT_CONFIGURED);
+      res.status(503).json(firebaseUnavailableBody()); // auth_not_configured, or auth_unavailable when the key is set but unusable
       return;
     }
     if (!otp()) {

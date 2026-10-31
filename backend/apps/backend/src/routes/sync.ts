@@ -17,7 +17,7 @@ import jwt from 'jsonwebtoken';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import rateLimit from 'express-rate-limit';
 import { logger } from '../lib/logger.js';
-import { AUTH_NOT_CONFIGURED, FirebaseAuthLike, getFirebaseAuth } from '../lib/firebaseAdmin.js';
+import { FirebaseAuthLike, firebaseUnavailableBody, getFirebaseAuth } from '../lib/firebaseAdmin.js';
 import {
   E164_RE,
   MAX_NAME_LENGTH,
@@ -272,7 +272,7 @@ export function createSyncRouter({ db, generator, firebase = getFirebaseAuth }: 
       try {
         const auth = firebase();
         if (!auth) {
-          res.status(503).json(AUTH_NOT_CONFIGURED);
+          res.status(503).json(firebaseUnavailableBody());
           return;
         }
         const secret = process.env.JWT_SECRET;
@@ -341,7 +341,7 @@ export function createSyncRouter({ db, generator, firebase = getFirebaseAuth }: 
     try {
       const auth = firebase();
       if (!auth) {
-        res.status(503).json(AUTH_NOT_CONFIGURED);
+        res.status(503).json(firebaseUnavailableBody());
         return;
       }
       const idToken = req.body?.idToken;

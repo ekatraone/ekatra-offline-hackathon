@@ -17,6 +17,21 @@ import { logger } from './logger.js';
  */
 export const AUTH_NOT_CONFIGURED = { success: false, error: 'auth_not_configured' } as const;
 
+/**
+ * The 503 body when FIREBASE_SERVICE_ACCOUNT IS set but unusable (bad base64 or JSON, or Firebase
+ * failing to initialize). Distinct from "not configured" because learners may have been created
+ * while the key worked, so the app must not treat it as "nothing to erase".
+ */
+export const AUTH_UNAVAILABLE = { success: false, error: 'auth_unavailable' } as const;
+
+/**
+ * Which 503 to send when `getFirebaseAuth()` gave nothing: "not configured" means the variable is
+ * absent or empty and nothing else; any non-empty value that still yielded no Auth is "unavailable".
+ */
+export function firebaseUnavailableBody(env: Record<string, string | undefined> = process.env) {
+  return env.FIREBASE_SERVICE_ACCOUNT?.trim() ? AUTH_UNAVAILABLE : AUTH_NOT_CONFIGURED;
+}
+
 /** The slice of firebase-admin's Auth that sign-in uses (also what tests stub). */
 export interface FirebaseAuthLike {
   verifyIdToken(idToken: string, checkRevoked?: boolean): Promise<Record<string, any>>;
@@ -42,7 +57,7 @@ export function getFirebaseAuth(): FirebaseAuthLike | null {
   if (override !== undefined) return override;
   if (cached !== undefined) return cached;
 
-  const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
+  const raw = process.env.FIREBASE_SERVICE_ACCOUNT?.trim();
   if (!raw) {
     cached = null;
     return null;
