@@ -20,6 +20,13 @@ interface LearnerSyncApi {
      * one, because a retry may run after the account is gone and a different person has signed in.
      */
     suspend fun deleteMe(token: String): DeleteOutcome
+
+    /**
+     * Erase the server-side learner of a Firebase user who has no learner jwt (they never opened Lessons on
+     * this phone). `DELETE /api/sync/auth/account` with `{ idToken }`; 200 returns `{ deleted: true|false }`,
+     * and both mean there is nothing left. Public: no Authorization header.
+     */
+    suspend fun deleteAccountByIdToken(idToken: String): DeleteOutcome
 }
 
 /** The public WhatsApp one-time-code endpoints. */

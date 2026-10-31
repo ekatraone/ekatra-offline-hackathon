@@ -9,6 +9,9 @@ import javax.inject.Singleton
 interface FirebaseSession {
     fun hasUser(): Boolean
 
+    /** The signed-in user's Firebase uid, or null. */
+    fun uid(): String?
+
     /** A Firebase ID token for the signed-in user, or null if nobody is signed in or it cannot be fetched. */
     suspend fun idToken(forceRefresh: Boolean): String?
 
@@ -21,6 +24,7 @@ interface FirebaseSession {
 @Singleton
 class FirebaseAuthSession @Inject constructor(private val auth: FirebaseAuth) : FirebaseSession {
     override fun hasUser(): Boolean = auth.currentUser != null
+    override fun uid(): String? = auth.currentUser?.uid
 
     override suspend fun idToken(forceRefresh: Boolean): String? = try {
         auth.currentUser?.getIdToken(forceRefresh)?.await()?.token

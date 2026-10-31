@@ -10,13 +10,13 @@ import javax.inject.Singleton
 fun personaHasLessons(personaKey: String): Boolean = personaKey == "maya"
 
 /**
- * What the main consent screen does for Lessons. Its text includes the same wording as the Lessons notice
- * (on Maya), so accepting it records the current Lessons version and a fresh install is not asked twice.
- * "Continue without analytics" records nothing here: Lessons still asks once. People who accepted an
- * older screen, which had no Lessons line, have no Lessons version and are asked once.
+ * What the main consent screen does for Lessons. On Maya that screen carries the same Lessons wording as the
+ * Lessons notice, so seeing it and continuing, by EITHER button, records the current Lessons version and a fresh
+ * install is not asked twice. Lessons is the feature working, not analytics: the analytics choice is not
+ * consulted. People who saw an older screen, which had no Lessons line, have no Lessons version and are asked once.
  */
-fun LessonsConsent.recordFromMainConsentScreen(accepted: Boolean, personaKey: String) {
-    if (accepted && personaHasLessons(personaKey)) accept()
+fun LessonsConsent.recordFromMainConsentScreen(personaKey: String) {
+    if (personaHasLessons(personaKey)) accept()
 }
 
 /** Where the Lessons consent choice is kept. */

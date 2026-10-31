@@ -1,0 +1,283 @@
+diff --git a/app/src/main/java/org/ekatra/alfred/NativeChatActivity.kt b/app/src/main/java/org/ekatra/alfred/NativeChatActivity.kt
+index 86018f5..751ccaf 100644
+--- a/app/src/main/java/org/ekatra/alfred/NativeChatActivity.kt
++++ b/app/src/main/java/org/ekatra/alfred/NativeChatActivity.kt
+@@ -23,6 +23,7 @@ import dagger.hilt.android.AndroidEntryPoint
+ import javax.inject.Inject
+ import org.ekatra.alfred.data.AppSettings
+ import org.ekatra.alfred.data.sync.SyncWorker
++import org.ekatra.alfred.lessons.lessonsEntryVisible
+ 
+ 
+ /**
+@@ -100,7 +101,7 @@ class NativeChatActivity : ComponentActivity() {
+                         onSettingsClick = {
+                             startActivity(Intent(this, SettingsActivity::class.java))
+                         },
+-                        onLessonsClick = if (ActivePersona.key == "maya") {
++                        onLessonsClick = if (lessonsEntryVisible(ActivePersona.key, BuildConfig.DEBUG, BuildConfig.SYNC_BASE_URL)) {
+                             { startActivity(Intent(this, LessonsActivity::class.java)) }
+                         } else null,
+                         onHotspotToggle = { enable ->
+diff --git a/app/src/main/java/org/ekatra/alfred/PrivacyConsentActivity.kt b/app/src/main/java/org/ekatra/alfred/PrivacyConsentActivity.kt
+index 6e871c4..8a29324 100644
+--- a/app/src/main/java/org/ekatra/alfred/PrivacyConsentActivity.kt
++++ b/app/src/main/java/org/ekatra/alfred/PrivacyConsentActivity.kt
+@@ -52,14 +52,15 @@ class PrivacyConsentActivity : ComponentActivity() {
+                     PrivacyConsentScreen(
+                         onAccept = { feedbackOptIn ->
+                             consentManager.record(collection = true, feedback = feedbackOptIn)
+-                            // This screen shows the Lessons wording on Maya, so accepting it covers Lessons too.
+-                            lessonsConsent.recordFromMainConsentScreen(accepted = true, personaKey = ActivePersona.key)
++                            // This screen shows the Lessons wording on Maya, so continuing covers Lessons too,
++                            // whichever button is tapped: Lessons is the feature, not analytics.
++                            lessonsConsent.recordFromMainConsentScreen(personaKey = ActivePersona.key)
+                             setResult(RESULT_OK)
+                             finish()
+                         },
+                         onDecline = {
+                             consentManager.record(collection = false, feedback = false)
+-                            lessonsConsent.recordFromMainConsentScreen(accepted = false, personaKey = ActivePersona.key)
++                            lessonsConsent.recordFromMainConsentScreen(personaKey = ActivePersona.key)
+                             setResult(RESULT_OK)
+                             finish()
+                         }
+diff --git a/app/src/main/java/org/ekatra/alfred/ProfileActivity.kt b/app/src/main/java/org/ekatra/alfred/ProfileActivity.kt
+index 2faf909..1fcc148 100644
+--- a/app/src/main/java/org/ekatra/alfred/ProfileActivity.kt
++++ b/app/src/main/java/org/ekatra/alfred/ProfileActivity.kt
+@@ -135,6 +135,9 @@ class ProfileActivity : ComponentActivity() {
+                         WhatsAppSignInScreen(
+                             state = whatsAppState,
+                             onPhoneChange = viewModel.whatsApp::updatePhone,
++                            onSubmitPhone = viewModel.whatsApp::submitPhone,
++                            onAcceptConsent = viewModel.whatsApp::acceptConsent,
++                            onEdit = viewModel.whatsApp::edit,
+                             onSendCode = viewModel.whatsApp::sendCode,
+                             onCodeChange = viewModel.whatsApp::updateCode,
+                             onVerify = viewModel.whatsApp::verify,
+@@ -378,11 +381,17 @@ fun EmailInputScreen(
+ 
+ // ==================== WhatsApp number sign-in ====================
+ 
+-/** Phone first, then the 6-digit code sent on WhatsApp. Same look as the email screen. */
++/**
++ * Number, then a read-back of it to confirm, then the 6-digit code sent on WhatsApp. If the Lessons notice
++ * has not been accepted it is shown on the number step first. Same look as the email screen.
++ */
+ @Composable
+ fun WhatsAppSignInScreen(
+     state: WhatsAppState,
+     onPhoneChange: (String) -> Unit,
++    onSubmitPhone: () -> Unit,
++    onAcceptConsent: () -> Unit,
++    onEdit: () -> Unit,
+     onSendCode: () -> Unit,
+     onCodeChange: (String) -> Unit,
+     onVerify: () -> Unit,
+@@ -390,9 +399,9 @@ fun WhatsAppSignInScreen(
+     onChangeNumber: () -> Unit,
+     onBack: () -> Unit
+ ) {
+-    // Back from the code step returns to the number; from the number it returns to the other sign-in options.
++    // Back steps backwards: code or confirmation to the number, the number to the other sign-in options.
+     androidx.activity.compose.BackHandler {
+-        if (state.step == WhatsAppStep.CODE) onChangeNumber() else onBack()
++        if (state.step != WhatsAppStep.PHONE) onEdit() else onBack()
+     }
+     val screenWidth = LocalConfiguration.current.screenWidthDp
+     val horizontalPadding = if (screenWidth < 360) 16.dp else 24.dp
+@@ -412,34 +421,56 @@ fun WhatsAppSignInScreen(
+         Text("💬", fontSize = if (screenWidth < 360) 36.sp else 48.sp)
+         Spacer(Modifier.height(12.dp))
+         Text(
+-            if (state.step == WhatsAppStep.PHONE) "Continue with WhatsApp" else "Enter your code",
++            when (state.step) {
++                WhatsAppStep.PHONE -> "Continue with WhatsApp"
++                WhatsAppStep.CONFIRM -> "Is this your number?"
++                WhatsAppStep.CODE -> "Enter your code"
++            },
+             fontSize = titleSize, fontWeight = FontWeight.Bold
+         )
+         Text(
+-            if (state.step == WhatsAppStep.PHONE) "We'll send a 6-digit code to your WhatsApp."
+-            else "We sent a 6-digit code on WhatsApp to ${state.phone}.",
++            when (state.step) {
++                WhatsAppStep.PHONE -> "We'll send a 6-digit code to your WhatsApp."
++                WhatsAppStep.CONFIRM -> "We'll send a code to ${state.phoneDisplay} on WhatsApp."
++                WhatsAppStep.CODE -> "We sent a 6-digit code on WhatsApp to ${state.phoneDisplay}."
++            },
+             fontSize = 14.sp, color = Color(0xFF6B7280), textAlign = TextAlign.Center
+         )
+         Spacer(Modifier.height(24.dp))
+ 
+-        if (state.step == WhatsAppStep.PHONE) {
+-            OutlinedTextField(
+-                value = state.phoneInput,
+-                onValueChange = onPhoneChange,
+-                label = { Text("WhatsApp number") },
+-                supportingText = { Text("Without a country code it's +91. For another country start with + and the code.") },
+-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+-                enabled = !state.busy,
+-                modifier = Modifier.fillMaxWidth(),
+-                shape = RoundedCornerShape(12.dp),
+-                singleLine = true
++        when (state.step) {
++            WhatsAppStep.PHONE -> {
++                OutlinedTextField(
++                    value = state.phoneInput,
++                    onValueChange = onPhoneChange,
++                    label = { Text("WhatsApp number") },
++                    supportingText = { Text("Without a country code it's +91. For another country start with + and the code.") },
++                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
++                    enabled = !state.needsConsent,
++                    modifier = Modifier.fillMaxWidth(),
++                    shape = RoundedCornerShape(12.dp),
++                    singleLine = true
++                )
++                if (state.needsConsent) {
++                    Spacer(Modifier.height(12.dp))
++                    // Sending the number is part of Lessons, so the Lessons notice comes first.
++                    Card(colors = CardDefaults.cardColors(containerColor = Color.White), modifier = Modifier.fillMaxWidth()) {
++                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
++                            Text(stringResource(R.string.lessons_consent_title), fontWeight = FontWeight.Bold, fontSize = 16.sp)
++                            Text(stringResource(R.string.lessons_consent_body), fontSize = 14.sp, color = Color(0xFF334155))
++                        }
++                    }
++                }
++            }
++            WhatsAppStep.CONFIRM -> Text(
++                state.phoneDisplay.orEmpty(), fontSize = 24.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center
+             )
+-        } else {
+-            OutlinedTextField(
++            WhatsAppStep.CODE -> OutlinedTextField(
+                 value = state.code,
+                 onValueChange = onCodeChange,
+                 label = { Text("6-digit code") },
+-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
++                // A numeric keypad that does not suggest or remember the code.
++                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                 enabled = !state.busy && !state.signedIn,
+                 modifier = Modifier.fillMaxWidth(),
+                 shape = RoundedCornerShape(12.dp),
+@@ -453,9 +484,18 @@ fun WhatsAppSignInScreen(
+ 
+         Spacer(Modifier.height(16.dp))
+ 
++        val primaryEnabled = when (state.step) {
++            WhatsAppStep.PHONE -> state.phoneInput.isNotBlank()
++            WhatsAppStep.CONFIRM -> !state.busy
++            WhatsAppStep.CODE -> state.canSubmitCode
++        }
+         Button(
+-            onClick = if (state.step == WhatsAppStep.PHONE) onSendCode else onVerify,
+-            enabled = if (state.step == WhatsAppStep.PHONE) !state.busy && state.phoneInput.isNotBlank() else state.canSubmitCode,
++            onClick = when (state.step) {
++                WhatsAppStep.PHONE -> if (state.needsConsent) onAcceptConsent else onSubmitPhone
++                WhatsAppStep.CONFIRM -> onSendCode
++                WhatsAppStep.CODE -> onVerify
++            },
++            enabled = primaryEnabled,
+             modifier = Modifier
+                 .fillMaxWidth()
+                 .height(50.dp),
+@@ -463,24 +503,33 @@ fun WhatsAppSignInScreen(
+             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB))
+         ) {
+             if (state.busy || state.signedIn) CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color.White)
+-            else Text(if (state.step == WhatsAppStep.PHONE) "Send code" else "Verify")
++            else Text(
++                when (state.step) {
++                    WhatsAppStep.PHONE -> if (state.needsConsent) stringResource(R.string.lessons_consent_accept) else "Continue"
++                    WhatsAppStep.CONFIRM -> "Send code"
++                    WhatsAppStep.CODE -> "Verify"
++                }
++            )
+         }
+ 
+-        if (state.step == WhatsAppStep.CODE) {
+-            Spacer(Modifier.height(8.dp))
+-            TextButton(onClick = onResend, enabled = state.canResend) {
+-                Text(
+-                    if (state.resendIn > 0) "Resend code in ${state.resendIn}s" else "Resend code",
+-                    color = if (state.canResend) Color(0xFF2563EB) else Color(0xFF9CA3AF)
+-                )
++        when (state.step) {
++            WhatsAppStep.PHONE -> {
++                Spacer(Modifier.height(8.dp))
++                TextButton(onClick = onBack) { Text("Other sign-in options", color = Color(0xFF2563EB)) }
+             }
+-            TextButton(onClick = onChangeNumber, enabled = !state.busy) {
+-                Text("Use a different number", color = Color(0xFF2563EB))
++            WhatsAppStep.CONFIRM -> {
++                Spacer(Modifier.height(8.dp))
++                TextButton(onClick = onEdit, enabled = !state.busy) { Text("Edit", color = Color(0xFF2563EB)) }
+             }
+-        } else {
+-            Spacer(Modifier.height(8.dp))
+-            TextButton(onClick = onBack, enabled = !state.busy) {
+-                Text("Other sign-in options", color = Color(0xFF2563EB))
++            WhatsAppStep.CODE -> {
++                Spacer(Modifier.height(8.dp))
++                TextButton(onClick = onResend, enabled = state.canResend) {
++                    Text(
++                        if (state.resendIn > 0) "Resend code in ${state.resendIn}s" else "Resend code",
++                        color = if (state.canResend) Color(0xFF2563EB) else Color(0xFF9CA3AF)
++                    )
++                }
++                TextButton(onClick = onChangeNumber, enabled = !state.busy) { Text("Use a different number", color = Color(0xFF2563EB)) }
+             }
+         }
+         Spacer(Modifier.weight(1f))
+diff --git a/app/src/main/java/org/ekatra/alfred/viewmodel/ProfileViewModel.kt b/app/src/main/java/org/ekatra/alfred/viewmodel/ProfileViewModel.kt
+index 5620df5..2e0e567 100644
+--- a/app/src/main/java/org/ekatra/alfred/viewmodel/ProfileViewModel.kt
++++ b/app/src/main/java/org/ekatra/alfred/viewmodel/ProfileViewModel.kt
+@@ -22,6 +22,7 @@ import org.ekatra.alfred.data.local.EkatraDatabase
+ import org.ekatra.alfred.data.model.UserProfile
+ import org.ekatra.alfred.lessons.FirebaseSession
+ import org.ekatra.alfred.lessons.LearnerSessionHooks
++import org.ekatra.alfred.lessons.LessonsConsent
+ import org.ekatra.alfred.lessons.PhoneAuthApi
+ import org.ekatra.alfred.lessons.WhatsAppSignIn
+ import java.util.concurrent.TimeUnit
+@@ -63,7 +64,8 @@ class ProfileViewModel @Inject constructor(
+     private val consentManager: ConsentManager,
+     phoneAuthApi: PhoneAuthApi,
+     firebaseSession: FirebaseSession,
+-    private val lessonsSession: LearnerSessionHooks
++    private val lessonsSession: LearnerSessionHooks,
++    lessonsConsent: LessonsConsent
+ ) : ViewModel() {
+ 
+     companion object {
+@@ -79,7 +81,7 @@ class ProfileViewModel @Inject constructor(
+     private var authChecked = false
+ 
+     /** Sign in with a one-time code sent on WhatsApp; ends in a Firebase sign-in like Google or email. */
+-    val whatsApp = WhatsAppSignIn(phoneAuthApi, firebaseSession, viewModelScope) { onWhatsAppSignedIn() }
++    val whatsApp = WhatsAppSignIn(phoneAuthApi, firebaseSession, lessonsConsent, viewModelScope) { onWhatsAppSignedIn() }
+ 
+     fun openWhatsApp() {
+         whatsApp.reset()
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 5760ee4..304c586 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -67,10 +67,12 @@
+     <!-- Lessons (Maya only; the consent screen and Lessons show these only when ActivePersona is Maya).
+          Server-side learner record: created by LearnerTokenProvider.exchange (POST /api/sync/auth/exchange),
+          filled by LearnerSyncManager (events, lesson requests) and erased by ServerAccountDeletion
+-         (DELETE /api/sync/me) when the account is deleted. Gated by lessons/LessonsConsent.kt. -->
+-    <string name="privacy_collect_lessons">If you use Lessons: your name, contact (phone or email) and lesson progress are stored on Ekatra\'s servers so they sync across your devices and WhatsApp. They are deleted when you delete your account.</string>
++         (DELETE /api/sync/me, or /api/sync/auth/account by ID token when no learner token exists) when the
++         account is deleted. The lesson topic is sent to Meta's model by the server (POST /api/sync/lessons/request).
++         Gated by lessons/LessonsConsent.kt. -->
++    <string name="privacy_collect_lessons">If you use Lessons: the topic you type is sent to Meta\'s AI to create the lesson. Your name, contact (phone or email) and lesson progress are stored on Ekatra\'s servers so they sync across your devices and WhatsApp. They are deleted when you delete your account, as soon as you\'re online if you\'re offline at the time.</string>
+     <string name="lessons_consent_title">Before you use Lessons</string>
+-    <string name="lessons_consent_body">When you use Lessons, your name, contact (phone or email) and lesson progress are stored on Ekatra\'s servers so they sync across your devices and WhatsApp. They are deleted when you delete your account.</string>
++    <string name="lessons_consent_body">When you use Lessons, the topic you type is sent to Meta\'s AI to create the lesson. Your name, contact (phone or email) and lesson progress are stored on Ekatra\'s servers so they sync across your devices and WhatsApp. They are deleted when you delete your account, as soon as you\'re online if you\'re offline at the time.</string>
+     <string name="lessons_consent_accept">Accept &amp; continue</string>
+     <string name="lessons_consent_decline">Not now</string>
+     <string name="lessons_consent_declined_title">Lessons needs this to sync</string>

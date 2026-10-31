@@ -109,7 +109,11 @@ class LearnerSyncClient internal constructor(
                 requestMethod = method
                 connectTimeout = CONNECT_TIMEOUT_MS
                 readTimeout = readTimeoutMs
-                if (authenticated) setRequestProperty("Authorization", "Bearer ${token ?: config.token}")
+                if (authenticated) {
+                    // Never follow a redirect with the bearer token attached: it could be sent to another host.
+                    instanceFollowRedirects = false
+                    setRequestProperty("Authorization", "Bearer ${token ?: config.token}")
+                }
                 setRequestProperty("Accept", "application/json")
                 if (body != null) {
                     doOutput = true
@@ -197,6 +201,23 @@ class LearnerSyncClient internal constructor(
                 raw.code == 401 -> DeleteOutcome.Unauthorized
                 // A 404 in our own {success:false} envelope says the learner is already gone. A bare or HTML 404
                 // (a proxy mid-redeploy) says nothing about the learner, so that one is retried.
+                raw.code == 404 && envelope(raw.text).let { it.fromApi && !it.ok } -> DeleteOutcome.Deleted
+                else -> DeleteOutcome.Failed(envelope(raw.text).error(raw.code))
+            }
+        } catch (e: IOException) {
+            DeleteOutcome.Failed(e.message ?: e.javaClass.simpleName)
+        } catch (e: RuntimeException) {
+            DeleteOutcome.Failed("Bad response: ${e.message}")
+        }
+    }
+
+    override suspend fun deleteAccountByIdToken(idToken: String): DeleteOutcome = withContext(Dispatchers.IO) {
+        if (config.baseUrl.isBlank()) return@withContext DeleteOutcome.NotConfigured
+        try {
+            val raw = send("DELETE", "/api/sync/auth/account", READ_TIMEOUT_MS, mapOf("idToken" to idToken), authenticated = false)
+            when {
+                raw.code in 200..299 -> DeleteOutcome.Deleted        // { deleted: true } or { deleted: false }: nothing left either way
+                raw.code == 401 -> DeleteOutcome.Unauthorized
                 raw.code == 404 && envelope(raw.text).let { it.fromApi && !it.ok } -> DeleteOutcome.Deleted
                 else -> DeleteOutcome.Failed(envelope(raw.text).error(raw.code))
             }

@@ -127,11 +127,11 @@ class RoomAccountDataTest {
 
     @Test
     fun `a pending server erase survives the local wipe, because it is the only way to retry it`() = runBlocking {
-        tokens.pendingDelete = "token-of-the-deleted-account"
+        tokens.pendingDeletes += "token-of-the-deleted-account"
 
         data.clear("uid1")
 
-        assertEquals("token-of-the-deleted-account", tokens.pendingDelete)
+        assertEquals(setOf("token-of-the-deleted-account"), tokens.pendingDeletes)
         assertNull("the active token is gone", tokens.token)
     }
 

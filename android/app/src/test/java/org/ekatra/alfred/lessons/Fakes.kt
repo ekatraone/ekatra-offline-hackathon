@@ -52,6 +52,8 @@ class FakeApi : LearnerSyncApi {
     }
     var meResult: () -> ApiResult<MeResponse> = { ApiResult.Ok(MeResponse()) }
 
+    var deleteByIdResult: (String) -> DeleteOutcome = { DeleteOutcome.Deleted }
+    val deleteByIdCalls = mutableListOf<String>()
     var deleteResult: (String) -> DeleteOutcome = { DeleteOutcome.Deleted }
     val deleteCalls = mutableListOf<String>()
 
@@ -78,6 +80,10 @@ class FakeApi : LearnerSyncApi {
         return eventsResult(events)
     }
     override suspend fun getMe(): ApiResult<MeResponse> { meCalls++; return meResult() }
+    override suspend fun deleteAccountByIdToken(idToken: String): DeleteOutcome {
+        deleteByIdCalls += idToken
+        return deleteByIdResult(idToken)
+    }
     override suspend fun deleteMe(token: String): DeleteOutcome {
         deleteCalls += token
         return deleteResult(token)
@@ -159,10 +165,17 @@ fun sampleBundleWithImages(courseId: String = "course-1", lessonId: String = "le
     )
 }
 
-class FakeTokenStore(var token: String? = null, var learner: String? = null, var pendingDelete: String? = null) : TokenStore {
-    override fun pendingDeleteToken() = pendingDelete
-    override fun setPendingDeleteToken(token: String) { pendingDelete = token }
-    override fun clearPendingDelete() { pendingDelete = null }
+class FakeTokenStore(
+    var token: String? = null,
+    var learner: String? = null,
+    val pendingDeletes: MutableSet<String> = mutableSetOf(),
+    var pendingIdUid: String? = null
+) : TokenStore {
+    override fun pendingDeleteTokens(): Set<String> = pendingDeletes.toSet()
+    override fun addPendingDeleteToken(token: String) { pendingDeletes += token }
+    override fun removePendingDeleteToken(token: String) { pendingDeletes -= token }
+    override fun pendingIdEraseUid() = pendingIdUid
+    override fun setPendingIdEraseUid(uid: String?) { pendingIdUid = uid }
     override fun token() = token
     override fun learnerId() = learner
     override fun save(token: String, learnerId: String?) { this.token = token; if (learnerId != null) learner = learnerId }
@@ -176,7 +189,9 @@ class FakePrefs : android.content.SharedPreferences {
 
     override fun getAll(): MutableMap<String, *> = data.toMutableMap()
     override fun getString(key: String, defValue: String?) = data[key] as? String ?: defValue
-    override fun getStringSet(key: String, defValues: MutableSet<String>?) = defValues
+    @Suppress("UNCHECKED_CAST")
+    override fun getStringSet(key: String, defValues: MutableSet<String>?): MutableSet<String>? =
+        (data[key] as? Set<String>)?.toMutableSet() ?: defValues
     override fun getInt(key: String, defValue: Int) = data[key] as? Int ?: defValue
     override fun getLong(key: String, defValue: Long) = data[key] as? Long ?: defValue
     override fun getFloat(key: String, defValue: Float) = data[key] as? Float ?: defValue
@@ -190,7 +205,7 @@ class FakePrefs : android.content.SharedPreferences {
         private val removed = mutableSetOf<String>()
         private var clearAll = false
         override fun putString(key: String, value: String?) = apply { pending[key] = value }
-        override fun putStringSet(key: String, values: MutableSet<String>?) = apply { pending[key] = values }
+        override fun putStringSet(key: String, values: MutableSet<String>?) = apply { pending[key] = values?.toSet() }
         override fun putInt(key: String, value: Int) = apply { pending[key] = value }
         override fun putLong(key: String, value: Long) = apply { pending[key] = value }
         override fun putFloat(key: String, value: Float) = apply { pending[key] = value }
@@ -209,6 +224,7 @@ class FakePrefs : android.content.SharedPreferences {
 
 class FakeFirebase(
     var user: Boolean = true,
+    var currentUid: String? = "firebase-uid-1",
     var idTokens: MutableList<String?> = mutableListOf("id-1"),
     var customTokenSignIn: Boolean = true
 ) : FirebaseSession {
@@ -216,6 +232,7 @@ class FakeFirebase(
     val customTokens = mutableListOf<String>()
     var signedOut = false
     override fun hasUser() = user
+    override fun uid(): String? = if (user) currentUid else null
     override suspend fun idToken(forceRefresh: Boolean): String? {
         idTokenRequests += forceRefresh
         return if (!user) null else if (idTokens.size > 1) idTokens.removeAt(0) else idTokens.firstOrNull()
@@ -258,6 +275,9 @@ class FakeConsentStore(var acceptedAt: Int = 0, var declinedAt: Int = 0) : Lesso
     override fun setDeclined(version: Int) { declinedAt = version }
     override fun clear() { acceptedAt = 0; declinedAt = 0 }
 }
+
+/** Lessons consent accepted at an arbitrary (possibly old) version. */
+fun consentAtVersion(v: Int) = LessonsConsent(FakeConsentStore(acceptedAt = v))
 
 /** Lessons consent that has been accepted at the current wording: what almost every test wants. */
 fun acceptedConsent() = LessonsConsent(FakeConsentStore(acceptedAt = LessonsConsent.CURRENT_VERSION))

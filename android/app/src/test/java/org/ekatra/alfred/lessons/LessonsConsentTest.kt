@@ -128,12 +128,12 @@ class LessonsConsentTest {
     // ---- the main consent screen ----
 
     @Test
-    fun `accepting the main consent screen on Maya records the current Lessons version, so a fresh install is not asked twice`() {
+    fun `continuing from the main consent screen on Maya records the current Lessons version`() {
         val store = FakeConsentStore()
         val c = LessonsConsent(store)
         assertEquals(ConsentState.NEEDED, c.state.value)
 
-        c.recordFromMainConsentScreen(accepted = true, personaKey = "maya")
+        c.recordFromMainConsentScreen(personaKey = "maya")
 
         assertEquals(ConsentState.ACCEPTED, c.state.value)
         assertEquals(LessonsConsent.CURRENT_VERSION, store.acceptedAt)
@@ -141,47 +141,41 @@ class LessonsConsentTest {
     }
 
     @Test
-    fun `continuing without analytics records nothing for Lessons, which still asks once`() {
-        val c = consentAt()
-
-        c.recordFromMainConsentScreen(accepted = false, personaKey = "maya")
-
-        assertEquals(ConsentState.NEEDED, c.state.value)
+    fun `it is recorded for Accept and for Continue without analytics alike, because Lessons is not analytics`() {
+        // The function takes no analytics choice at all, so no button can change the outcome.
+        for (analyticsChoice in listOf(true, false)) {
+            val c = consentAt()
+            c.recordFromMainConsentScreen(personaKey = "maya")   // same call whichever button was tapped
+            assertTrue("analytics=$analyticsChoice", c.isAccepted())
+        }
     }
 
     @Test
     fun `Asmaa has no Lessons, so its consent screen never records Lessons consent`() {
         val c = consentAt()
-        c.recordFromMainConsentScreen(accepted = true, personaKey = "asmaa")
+        c.recordFromMainConsentScreen(personaKey = "asmaa")
         assertEquals(ConsentState.NEEDED, c.state.value)
         assertFalse(personaHasLessons("asmaa"))
         assertTrue(personaHasLessons("maya"))
     }
 
     @Test
-    fun `someone who accepted the old screen has no Lessons version and is still asked once`() {
-        // The old screen (v1) had no Lessons line and recorded nothing for Lessons.
+    fun `someone who saw the old screen has no Lessons version and is still asked once`() {
         val c = consentAt(accepted = 0)
         assertEquals(ConsentState.NEEDED, c.state.value)
-        assertFalse(c.isAccepted())
-        // Accepting the new Lessons notice is what records it.
         c.accept()
         assertTrue(c.isAccepted())
     }
 
     @Test
-    fun `a decline of the Lessons notice is not undone by a later main-screen decline`() {
-        val c = consentAt()
-        c.decline()
-        c.recordFromMainConsentScreen(accepted = false, personaKey = "maya")
-        assertEquals(ConsentState.DECLINED, c.state.value)
-    }
-
-    @Test
-    fun `the consent screen wires accept to the Lessons record and decline to a no-op, using the same Maya check as the bullet`() {
+    fun `the consent screen records Lessons for both buttons, with the same Maya check as the bullet`() {
         val screen = res("main/java/org/ekatra/alfred/PrivacyConsentActivity.kt")
-        assertTrue(screen.contains("lessonsConsent.recordFromMainConsentScreen(accepted = true, personaKey = ActivePersona.key)"))
-        assertTrue(screen.contains("lessonsConsent.recordFromMainConsentScreen(accepted = false, personaKey = ActivePersona.key)"))
+        val call = "lessonsConsent.recordFromMainConsentScreen(personaKey = ActivePersona.key)"
+        assertEquals("once in onAccept and once in onDecline", 2, screen.windowed(call.length).count { it == call })
+        val accept = screen.substringAfter("onAccept = {").substringBefore("onDecline = {")
+        val decline = screen.substringAfter("onDecline = {")
+        assertTrue(accept.contains(call)); assertTrue(decline.contains(call))
+        assertFalse("the analytics choice is not passed in", screen.contains("recordFromMainConsentScreen(accepted"))
         assertTrue(screen.contains("if (personaHasLessons(ActivePersona.key)) BulletPoint(stringResource(R.string.privacy_collect_lessons))"))
     }
 
@@ -354,12 +348,16 @@ class LessonsConsentTest {
     private fun res(path: String) = File("src/$path").readText()
 
     @Test
-    fun `the Lessons notice says what is stored, where, why, and that it is deleted with the account`() {
+    fun `the Lessons notice says what is sent to Meta, what is stored where, why, and when it is deleted`() {
         val strings = res("main/res/values/strings.xml")
         for (name in listOf("lessons_consent_body", "privacy_collect_lessons")) {
             val text = Regex("""<string name="$name">(.*?)</string>""", RegexOption.DOT_MATCHES_ALL).find(strings)?.groupValues?.get(1)
             assertTrue("$name exists", text != null)
-            for (phrase in listOf("name", "contact (phone or email)", "lesson progress", "Ekatra", "servers", "sync across", "WhatsApp", "deleted when you delete your account")) {
+            for (phrase in listOf(
+                "the topic you type is sent to Meta\\'s AI to create the lesson",
+                "name", "contact (phone or email)", "lesson progress", "stored on Ekatra\\'s servers", "sync across", "WhatsApp",
+                "deleted when you delete your account", "as soon as you\\'re online if you\\'re offline at the time"
+            )) {
                 assertTrue("$name should mention '$phrase'", text!!.contains(phrase))
             }
         }

@@ -53,7 +53,7 @@ class ProfileViewModelTest {
 
     private fun viewModel() = ProfileViewModel(
         auth, mockk(relaxed = true), dao, mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true),
-        phoneApi, session, hooks
+        phoneApi, session, hooks, org.ekatra.alfred.lessons.acceptedConsent()
     )
 
     /**
@@ -127,7 +127,7 @@ class ProfileViewModelTest {
         val vm = viewModel()
         vm.openWhatsApp()
         vm.whatsApp.updatePhone("98765 43210")
-        vm.whatsApp.sendCode()
+        vm.whatsApp.submitPhone(); vm.whatsApp.sendCode()
         advanceUntilIdle()
         vm.whatsApp.updateCode("123456")
 
@@ -147,7 +147,7 @@ class ProfileViewModelTest {
         phoneApi.verifyResult = { _, _ -> org.ekatra.alfred.lessons.VerifyOutcome.WrongCode }
         val vm = viewModel()
         vm.openWhatsApp()
-        vm.whatsApp.updatePhone("9876543210"); vm.whatsApp.sendCode(); advanceUntilIdle()
+        vm.whatsApp.updatePhone("9876543210"); vm.whatsApp.submitPhone(); vm.whatsApp.sendCode(); advanceUntilIdle()
         vm.whatsApp.updateCode("000000"); vm.whatsApp.verify(); advanceUntilIdle()
 
         assertTrue(vm.uiState.value.showWhatsApp)
@@ -161,7 +161,7 @@ class ProfileViewModelTest {
     fun `reopening the WhatsApp screens starts from a clean slate`() = runTest(dispatcher) {
         val vm = viewModel()
         vm.openWhatsApp()
-        vm.whatsApp.updatePhone("9876543210"); vm.whatsApp.sendCode(); advanceUntilIdle()
+        vm.whatsApp.updatePhone("9876543210"); vm.whatsApp.submitPhone(); vm.whatsApp.sendCode(); advanceUntilIdle()
         vm.closeWhatsApp()
 
         vm.openWhatsApp()
