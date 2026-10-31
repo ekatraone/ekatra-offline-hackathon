@@ -104,6 +104,22 @@ private fun SyncChip(ui: LessonsUiState, onDark: Boolean = false) {
 
 // ---------------- home ----------------
 
+internal data class PendingMessage(val text: String, val showProgress: Boolean)
+
+/**
+ * What to tell the learner about lesson requests still in the queue. "Back online" only makes sense
+ * while the device is offline; online, a pending request is being created (or retried after a 409
+ * in_progress, 5xx, ...) and the server can take a minute or two.
+ */
+internal fun pendingRequestMessage(ui: LessonsUiState): PendingMessage? = when {
+    ui.pendingTopics.isEmpty() -> null
+    !ui.online -> PendingMessage("Will be created when you're back online", showProgress = false)
+    ui.syncStatus == SyncStatus.UNAUTHORIZED -> PendingMessage("Waiting: your lessons sign-in expired", showProgress = false)
+    else -> PendingMessage("Creating your lesson with Muse Spark… this can take a minute", showProgress = true)
+}
+
+internal fun failedRequestText(f: FailedLessonRequest) = "Couldn't create lesson: ${f.reason}"
+
 @Composable
 private fun HomeScreen(ui: LessonsUiState, vm: LessonsViewModel) {
     var topic by remember { mutableStateOf("") }
@@ -121,17 +137,11 @@ private fun HomeScreen(ui: LessonsUiState, vm: LessonsViewModel) {
                         enabled = ui.configured && !ui.requesting,
                         label = { Text("Topic, e.g. fractions") }, modifier = Modifier.fillMaxWidth()
                     )
-                    if (ui.requesting) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                            Text("Writing your lesson. This can take a minute or two.", fontSize = 13.sp)
-                        }
-                    } else {
-                        Button(
-                            onClick = { if (vm.askForLesson(topic)) topic = "" },
-                            enabled = ui.configured && topic.isNotBlank()
-                        ) { Text(if (ui.online) "Create lesson" else "Queue lesson") }
-                    }
+                    // While a request is in flight the card below shows the progress; this button just waits.
+                    Button(
+                        onClick = { if (vm.askForLesson(topic)) topic = "" },
+                        enabled = ui.configured && topic.isNotBlank() && !ui.requesting
+                    ) { Text(if (ui.requesting) "Creating…" else if (ui.online) "Create lesson" else "Queue lesson") }
                     if (!ui.configured) {
                         Text("Lessons aren't set up on this build.", color = Red, fontSize = 13.sp)
                     }
@@ -144,17 +154,32 @@ private fun HomeScreen(ui: LessonsUiState, vm: LessonsViewModel) {
                 }
             }
         }
-        if (ui.pendingTopics.isNotEmpty()) {
+        items(ui.failedRequests, key = { "failed-" + it.clientRequestId }) { f ->
+            Card(colors = CardDefaults.cardColors(containerColor = Color(0xFFFEE2E2))) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(failedRequestText(f), fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = Red)
+                    Text("Topic: ${f.topic}", fontSize = 13.sp, color = Color(0xFF475569))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = { vm.retryFailedRequest(f.clientRequestId) }, enabled = !ui.requesting) { Text("Try again") }
+                        TextButton(onClick = { vm.dismissFailedRequest(f.clientRequestId) }) { Text("Dismiss") }
+                    }
+                }
+            }
+        }
+        pendingRequestMessage(ui)?.let { msg ->
             item {
                 Card(colors = CardDefaults.cardColors(containerColor = Color(0xFFFEF3C7))) {
-                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("Will be created when you're back online", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            if (msg.showProgress) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                            Text(msg.text, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                        }
                         ui.pendingTopics.forEach { Text("• $it", fontSize = 14.sp) }
                     }
                 }
             }
         }
-        if (ui.bundles.isEmpty() && ui.configured && ui.pendingTopics.isEmpty()) {
+        if (ui.bundles.isEmpty() && ui.configured && ui.pendingTopics.isEmpty() && ui.failedRequests.isEmpty()) {
             item { Text("No lessons yet. Ask for one above.", color = Color(0xFF64748B), modifier = Modifier.padding(8.dp)) }
         }
         items(ui.bundles, key = { it.course.id }) { bundle -> CourseCard(bundle, ui, vm) }

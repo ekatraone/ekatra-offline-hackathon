@@ -121,6 +121,19 @@ class LearnerSyncManager @Inject constructor(
         return clientRequestId
     }
 
+    /**
+     * Try a refused request again as a brand new one: a new clientRequestId, because the server
+     * remembers the old id as failed. @return false if [clientRequestId] is not a failed request.
+     */
+    suspend fun retryFailedRequest(clientRequestId: String): Boolean {
+        val failed = progress.data.failedRequests.firstOrNull { it.clientRequestId == clientRequestId } ?: return false
+        enqueueLessonRequest(failed.topic, failed.language) // queue first, then forget the failure
+        progress.removeFailedRequest(clientRequestId)
+        return true
+    }
+
+    fun dismissFailedRequest(clientRequestId: String) = progress.removeFailedRequest(clientRequestId)
+
     // ---- sync ----
 
     /** One full pass: lesson requests, then events in batches, then refresh /me. Never overlaps itself. */
@@ -157,6 +170,8 @@ class LearnerSyncManager @Inject constructor(
                     if (r.code in DROP_REQUEST_CODES) {
                         // Only 400/422 mean the topic itself is unacceptable. Tell the learner why.
                         Log.w(TAG, "Lesson request dropped (${r.code}): ${r.message}")
+                        // Keep the reason (the queue row is about to go) so the UI can show it and offer a retry.
+                        progress.addFailedRequest(FailedLessonRequest(req.clientRequestId, req.topic, req.language, r.message))
                         queue.delete(item); dropped++; requestErrors += r.message
                     } else {
                         // 404/408/409/413 and anything else can come from a redeploying service or a

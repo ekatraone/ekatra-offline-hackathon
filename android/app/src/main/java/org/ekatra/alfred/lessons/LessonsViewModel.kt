@@ -59,6 +59,8 @@ data class LessonsUiState(
     val bundles: List<LessonBundle> = emptyList(),
     val completed: Set<String> = emptySet(),
     val pendingTopics: List<String> = emptyList(),
+    /** Requests the server refused for good; shown with the reason and a retry button. */
+    val failedRequests: List<FailedLessonRequest> = emptyList(),
     val pendingCount: Int = 0,
     val syncStatus: SyncStatus = SyncStatus.IDLE,
     /** True from tapping "Create lesson" until the sync pass that handles it ends. */
@@ -119,6 +121,7 @@ class LessonsViewModel @Inject constructor(
                 _ui.update {
                     it.copy(
                         completed = p.completedLessonIds,
+                        failedRequests = p.failedRequests,
                         answeredLessonIds = p.answers.values.map { a -> a.lessonId }.toSet(),
                         profile = p.profile,
                         lessonTitles = p.me?.lessonTitles.orEmpty()
@@ -157,9 +160,7 @@ class LessonsViewModel @Inject constructor(
 
     private suspend fun runSync() {
         val report = manager.sync()
-        if (report.requestErrors.isNotEmpty()) {
-            _ui.update { it.copy(notice = "Couldn't create lesson: ${report.requestErrors.first()}") }
-        } else if (report.status == SyncStatus.UNAUTHORIZED) {
+        if (report.status == SyncStatus.UNAUTHORIZED) {
             _ui.update { it.copy(notice = "Lessons sign-in expired. Ask for a new token.") }
         }
         _ui.update { it.copy(requesting = false) }
@@ -172,6 +173,23 @@ class LessonsViewModel @Inject constructor(
     }
 
     fun dismissNotice() = _ui.update { it.copy(notice = null) }
+
+    /** Try a refused request again. It is queued under a NEW clientRequestId. */
+    fun retryFailedRequest(clientRequestId: String) {
+        viewModelScope.launch(ioDispatcher) {
+            if (!manager.retryFailedRequest(clientRequestId)) return@launch
+            trigger.enqueue()
+            refreshPendingTopics()
+            if (connectivity.isOnline()) {
+                _ui.update { it.copy(requesting = true, notice = null) }
+                runSync()
+            }
+        }
+    }
+
+    fun dismissFailedRequest(clientRequestId: String) {
+        viewModelScope.launch(ioDispatcher) { manager.dismissFailedRequest(clientRequestId) }
+    }
 
     // ---- ask for a lesson ----
 
@@ -195,7 +213,7 @@ class LessonsViewModel @Inject constructor(
                 _ui.update { it.copy(requesting = true, notice = null) }
                 runSync()
             } else {
-                _ui.update { it.copy(notice = "Will be created when you're back online") }
+                // The pending card says "Will be created when you're back online".
                 refreshPendingTopics()
             }
         }

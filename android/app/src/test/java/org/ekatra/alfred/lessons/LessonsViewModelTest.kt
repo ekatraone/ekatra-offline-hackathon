@@ -240,7 +240,7 @@ class LessonsViewModelTest {
         assertTrue(vm.askForLesson("  photosynthesis "))
 
         assertEquals(listOf("photosynthesis"), vm.uiState.value.pendingTopics)
-        assertEquals("Will be created when you're back online", vm.uiState.value.notice)
+        assertEquals(PendingMessage("Will be created when you're back online", showProgress = false), pendingRequestMessage(vm.uiState.value))
         assertTrue(api.lessonCalls.isEmpty())
         assertTrue(trigger.count >= 1)
         assertEquals(1, dao.items.count { it.type == "lesson_request" })
@@ -275,15 +275,132 @@ class LessonsViewModelTest {
     }
 
     @Test
-    fun `a server rejection is shown to the learner`() = runTest {
-        api.lessonResult = { _, _, _ -> ApiResult.Rejected(400, "topic must be 2-120 characters") }
+    fun `a refused request is kept with its reason instead of vanishing`() = runTest {
+        api.lessonResult = { _, _, _ -> ApiResult.Rejected(422, "generation_failed") }
         newVm()
 
-        vm.askForLesson("ab")
+        vm.askForLesson("decimals")
 
-        assertEquals("Couldn't create lesson: topic must be 2-120 characters", vm.uiState.value.notice)
+        val failed = vm.uiState.value.failedRequests.single()
+        assertEquals("decimals", failed.topic)
+        assertEquals("Couldn't create lesson: generation_failed", failedRequestText(failed))
         assertTrue(dao.items.none { it.type == "lesson_request" })
+        assertTrue(vm.uiState.value.pendingTopics.isEmpty())
+        assertNull("a refused request is not 'pending' any more", pendingRequestMessage(vm.uiState.value))
         assertFalse(vm.uiState.value.requesting)
+        // ...and it survives a restart.
+        assertEquals("decimals", LessonProgressStore(File(dir, "p.json")).data.failedRequests.single().topic)
+    }
+
+    @Test
+    fun `a 400 is also kept with its reason`() = runTest {
+        api.lessonResult = { _, _, _ -> ApiResult.Rejected(400, "topic must be 2-120 characters") }
+        newVm()
+        vm.askForLesson("ab")
+        assertEquals("Couldn't create lesson: topic must be 2-120 characters", failedRequestText(vm.uiState.value.failedRequests.single()))
+    }
+
+    @Test
+    fun `try again queues the topic under a new request id and clears the failure`() = runTest {
+        api.lessonResult = { _, _, _ -> ApiResult.Rejected(422, "generation_failed") }
+        newVm()
+        vm.askForLesson("decimals")
+        val oldId = api.lessonCalls.single().third
+        api.lessonResult = { _, _, _ -> ApiResult.Ok(RequestLessonResult("course-2", sampleBundle("course-2", "lesson-9"))) }
+
+        vm.retryFailedRequest(vm.uiState.value.failedRequests.single().clientRequestId)
+
+        assertEquals(2, api.lessonCalls.size)
+        val newId = api.lessonCalls.last().third
+        assertTrue("retry must not reuse the failed id", newId != oldId)
+        assertEquals("decimals", api.lessonCalls.last().first)
+        assertTrue(vm.uiState.value.failedRequests.isEmpty())
+        assertNotNull(bundles.get("course-2"))
+    }
+
+    @Test
+    fun `try again while offline stays queued with the offline message`() = runTest {
+        api.lessonResult = { _, _, _ -> ApiResult.Rejected(400, "bad") }
+        newVm()
+        vm.askForLesson("decimals")
+        net.online = false
+
+        vm.retryFailedRequest(vm.uiState.value.failedRequests.single().clientRequestId)
+
+        assertEquals(listOf("decimals"), vm.uiState.value.pendingTopics)
+        assertEquals("Will be created when you're back online", pendingRequestMessage(vm.uiState.value)?.text)
+        assertTrue(vm.uiState.value.failedRequests.isEmpty())
+        assertEquals(1, api.lessonCalls.size)
+    }
+
+    @Test
+    fun `dismissing a failure removes it`() = runTest {
+        api.lessonResult = { _, _, _ -> ApiResult.Rejected(400, "bad") }
+        newVm()
+        vm.askForLesson("decimals")
+
+        vm.dismissFailedRequest(vm.uiState.value.failedRequests.single().clientRequestId)
+
+        assertTrue(vm.uiState.value.failedRequests.isEmpty())
+        assertTrue(progress.data.failedRequests.isEmpty())
+    }
+
+    @Test
+    fun `retrying an unknown failure does nothing`() = runTest {
+        newVm()
+        vm.retryFailedRequest("nope")
+        assertTrue(dao.items.isEmpty())
+        assertTrue(api.lessonCalls.isEmpty())
+    }
+
+    // ---- pending message depends on being online ----
+
+    @Test
+    fun `online with a request still pending says it is being created, not 'back online'`() = runTest {
+        for (failure in listOf<ApiResult<RequestLessonResult>>(
+            ApiResult.Rejected(409, "in_progress"), ApiResult.Retryable("HTTP 503"), ApiResult.Rejected(404, "gone")
+        )) {
+            dao.deleteAll()
+            api.lessonResult = { _, _, _ -> failure }
+            newVm()
+
+            vm.askForLesson("fractions")
+
+            val ui = vm.uiState.value
+            assertTrue(ui.online)
+            assertEquals(listOf("fractions"), ui.pendingTopics)
+            val msg = pendingRequestMessage(ui)!!
+            assertEquals("Creating your lesson with Muse Spark… this can take a minute", msg.text)
+            assertTrue("shows a progress indicator", msg.showProgress)
+            assertFalse(msg.text.contains("back online"))
+            assertTrue("a retryable failure is not shown as a failure", ui.failedRequests.isEmpty())
+        }
+    }
+
+    @Test
+    fun `the message flips with connectivity`() = runTest {
+        api.lessonResult = { _, _, _ -> ApiResult.Retryable("HTTP 503") }
+        newVm()
+        vm.askForLesson("fractions")
+        assertTrue(pendingRequestMessage(vm.uiState.value)!!.showProgress)
+
+        net.online = false
+        assertEquals("Will be created when you're back online", pendingRequestMessage(vm.uiState.value)!!.text)
+        assertFalse(pendingRequestMessage(vm.uiState.value)!!.showProgress)
+    }
+
+    @Test
+    fun `an expired sign-in is not described as creating`() {
+        val ui = LessonsUiState(online = true, pendingTopics = listOf("x"), syncStatus = SyncStatus.UNAUTHORIZED)
+        val msg = pendingRequestMessage(ui)!!
+        assertFalse(msg.showProgress)
+        assertTrue(msg.text.contains("sign-in expired"))
+    }
+
+    @Test
+    fun `no pending requests means no message`() {
+        assertNull(pendingRequestMessage(LessonsUiState(online = true)))
+        assertNull(pendingRequestMessage(LessonsUiState(online = false)))
     }
 
     @Test

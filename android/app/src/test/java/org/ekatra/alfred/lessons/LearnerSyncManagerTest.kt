@@ -165,6 +165,33 @@ class LearnerSyncManagerTest {
         assertEquals(1, report.requestsDropped)
         assertEquals(listOf("topic too short"), report.requestErrors)
         assertTrue(dao.items.isEmpty())
+        val failed = progress.data.failedRequests.single()
+        assertEquals("x", failed.topic)
+        assertEquals("topic too short", failed.reason)
+    }
+
+    @Test
+    fun `retrying a failed request uses a fresh request id`() = runTest {
+        val oldId = manager.enqueueLessonRequest("fractions", "en")
+        api.lessonResult = { _, _, _ -> ApiResult.Rejected(422, "generation_failed") }
+        manager.sync()
+        assertEquals(oldId, progress.data.failedRequests.single().clientRequestId)
+
+        assertTrue(manager.retryFailedRequest(oldId))
+
+        val queued = dao.items.single { it.type == "lesson_request" }
+        assertTrue(!queued.payload.contains(oldId))
+        assertTrue(queued.payload.contains("fractions"))
+        assertTrue(progress.data.failedRequests.isEmpty())
+        assertTrue(!manager.retryFailedRequest(oldId))
+    }
+
+    @Test
+    fun `a retryable failure is never recorded as a failure`() = runTest {
+        manager.enqueueLessonRequest("fractions", "en")
+        api.lessonResult = { _, _, _ -> ApiResult.Rejected(409, "in_progress") }
+        manager.sync()
+        assertTrue(progress.data.failedRequests.isEmpty())
     }
 
     @Test

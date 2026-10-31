@@ -57,6 +57,7 @@ class RoomAccountDataTest {
         progress.recordAnswer("c1", "l1", "q1", "B", true, "2026-11-01T00:00:00.000Z")
         progress.markCompleted("l1")
         progress.saveProfile(ServerProfile(struggles = listOf("l1")))
+        progress.addFailedRequest(org.ekatra.alfred.lessons.FailedLessonRequest("r1", "topic", "en", "bad"))
         queue.insert(SyncQueueItem(type = "learner_event", payload = "{}"))
         queue.insert(SyncQueueItem(type = "lesson_request", payload = "{}"))
 
@@ -70,6 +71,7 @@ class RoomAccountDataTest {
         assertTrue(progress.data.answers.isEmpty())
         assertTrue(progress.data.completedLessonIds.isEmpty())
         assertNull(progress.data.profile)
+        assertTrue(progress.data.failedRequests.isEmpty())
     }
 
     @Test

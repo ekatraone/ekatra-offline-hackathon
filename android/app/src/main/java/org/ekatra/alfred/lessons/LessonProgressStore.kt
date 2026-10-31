@@ -13,6 +13,14 @@ data class StoredAnswer(
     val answeredAt: String
 )
 
+/** A lesson request the server refused for good (400/422). Kept so the learner can read why and try again. */
+data class FailedLessonRequest(
+    val clientRequestId: String,
+    val topic: String,
+    val language: String,
+    val reason: String
+)
+
 data class ProgressData(
     /** questionId -> the learner's latest answer. */
     val answers: Map<String, StoredAnswer> = emptyMap(),
@@ -21,7 +29,8 @@ data class ProgressData(
     val me: MeResponse? = null,
     val profile: ServerProfile? = null,
     /** Courses the bundle endpoint refused with 404/422; not asked for again. */
-    val unavailableCourseIds: Set<String> = emptySet()
+    val unavailableCourseIds: Set<String> = emptySet(),
+    val failedRequests: List<FailedLessonRequest> = emptyList()
 )
 
 /** Small JSON store for local answers, completion and the cached server profile. */
@@ -58,6 +67,16 @@ class LessonProgressStore(private val file: File) {
     }
 
     @Synchronized
+    fun addFailedRequest(failed: FailedLessonRequest) {
+        update { it.copy(failedRequests = it.failedRequests.filterNot { f -> f.clientRequestId == failed.clientRequestId } + failed) }
+    }
+
+    @Synchronized
+    fun removeFailedRequest(clientRequestId: String) {
+        update { it.copy(failedRequests = it.failedRequests.filterNot { f -> f.clientRequestId == clientRequestId }) }
+    }
+
+    @Synchronized
     fun saveProfile(profile: ServerProfile) {
         update { it.copy(profile = profile) }
     }
@@ -86,6 +105,7 @@ class LessonProgressStore(private val file: File) {
         gson.fromJson(file.readText(Charsets.UTF_8), ProgressData::class.java)
             // Gson skips constructors, so a hand-edited or older file can leave these null.
             ?.let { it.copy(answers = it.answers ?: emptyMap(), completedLessonIds = it.completedLessonIds ?: emptySet(),
-                unavailableCourseIds = it.unavailableCourseIds ?: emptySet()) }
+                unavailableCourseIds = it.unavailableCourseIds ?: emptySet(),
+                failedRequests = it.failedRequests ?: emptyList()) }
     }.getOrNull() ?: ProgressData()
 }
