@@ -486,4 +486,86 @@ class ServerAccountDeletionTest {
         }
         assertEquals(listOf("GET", "GET", "DELETE", "POST", "POST", "POST", "POST", "POST"), seen.map { it.first })
     }
+
+    // ---- a backend with no Firebase configured never blocks the deletion ----
+
+    private val notConfigured = """{"success":false,"error":"auth_not_configured"}"""
+
+    @Test
+    fun `a 503 with exactly auth_not_configured on the ID-token erase counts as done, since no learner can exist`() = runBlocking {
+        startServer()
+        status = 503; bodyOverride = notConfigured
+
+        assertEquals(DeleteOutcome.Deleted, client().deleteAccountByIdToken("t"))
+    }
+
+    @Test
+    fun `any other 503 still blocks the deletion`() = runBlocking {
+        startServer()
+        status = 503
+        for (body in listOf(
+            """{"success":false,"error":"boom"}""",
+            """{"success":false,"error":"Auth_Not_Configured"}""",      // not the pinned code
+            """{"success":false,"error":"auth_not_configured_yet"}""",
+            """{"success":false,"error":"firebase_unavailable"}""",
+            """{"success":false}""",
+            """{"error":"auth_not_configured"}""",                       // no success flag: not our envelope
+            """{"success":true,"error":"auth_not_configured"}""",
+            "<html><body>503 Service Unavailable</body></html>",
+            "",
+            "auth_not_configured"
+        )) {
+            bodyOverride = body
+            assertTrue("body '$body'", client().deleteAccountByIdToken("t") is DeleteOutcome.Failed)
+        }
+    }
+
+    @Test
+    fun `that code on any status but 503 does not count`() = runBlocking {
+        startServer()
+        bodyOverride = notConfigured
+        for (code in listOf(400, 429, 500, 502, 504)) {
+            status = code
+            assertTrue("HTTP $code", client().deleteAccountByIdToken("t") is DeleteOutcome.Failed)
+        }
+    }
+
+    @Test
+    fun `a 429 and a network error still stop the deletion`() = runBlocking {
+        startServer()
+        status = 429; bodyOverride = """{"success":false,"error":"rate_limited"}"""
+        assertTrue(client().deleteAccountByIdToken("t") is DeleteOutcome.Failed)
+
+        val c = client()
+        server.close()
+        assertTrue(c.deleteAccountByIdToken("t") is DeleteOutcome.Failed)
+    }
+
+    @Test
+    fun `the jwt erase is unchanged, so auth_not_configured on DELETE me still blocks`() = runBlocking {
+        startServer()
+        status = 503; bodyOverride = notConfigured
+
+        assertTrue(client().deleteMe("jwt") is DeleteOutcome.Failed)
+    }
+
+    @Test
+    fun `end to end, a backend with no Firebase lets the deletion go ahead, and a broken one does not`() = runBlocking {
+        startServer()
+        val store = FakeTokenStore()       // no learner jwt: the ID-token route
+        val fb = FakeFirebase(user = true, currentUid = "uid-1", idTokens = mutableListOf("id-token"))
+        val erase = ServerAccountDeletion(client(), SyncConfig("http://127.0.0.1:${server.localPort}/", "", store), FakeConnectivity(true), fb, lessonsEnabled = true)
+
+        status = 503; bodyOverride = notConfigured
+        assertTrue("nothing to erase on a server with no Firebase", erase.eraseLearner())
+
+        bodyOverride = """{"success":false,"error":"boom"}"""
+        assertFalse("a genuinely failing server stops it", erase.eraseLearner())
+
+        bodyOverride = "<html>503</html>"
+        assertFalse(erase.eraseLearner())
+
+        status = 200; bodyOverride = """{"success":true,"deleted":false,"data":{"deleted":false}}"""
+        assertTrue(erase.eraseLearner())
+    }
 }

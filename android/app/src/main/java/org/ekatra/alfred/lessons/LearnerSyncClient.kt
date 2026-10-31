@@ -30,6 +30,8 @@ class LearnerSyncClient internal constructor(
         /** Writing a lesson takes 60-240 s and the server gives up at 240 s; wait 300 s so we never quit first. */
         const val LESSON_READ_TIMEOUT_MS = 300_000
         const val EVENT_BATCH_LIMIT = 20
+        /** The pinned error code of a 503 from a backend with no Firebase Admin configured. */
+        const val AUTH_NOT_CONFIGURED = "auth_not_configured"
         const val DEFAULT_RESEND_SECONDS = 30
         const val DEFAULT_EXPIRES_SECONDS = 600
         /** Lesson images are about 150-300 KB; refuse anything absurd rather than fill memory. */
@@ -223,6 +225,10 @@ class LearnerSyncClient internal constructor(
                 raw.code in 200..299 -> DeleteOutcome.Deleted        // { deleted: true } or { deleted: false }: nothing left either way
                 raw.code == 401 -> DeleteOutcome.Unauthorized
                 raw.code == 404 && envelope(raw.text).let { it.fromApi && !it.ok } -> DeleteOutcome.Deleted
+                // The server has no Firebase configured, so no learner can ever have been created by an exchange:
+                // there is nothing to erase and the deletion must not be blocked by our backend's setup. Only this
+                // exact code on a 503 counts; any other 503, an HTML one, a 429 or a network error still stops it.
+                raw.code == 503 && envelope(raw.text).let { it.fromApi && !it.ok && it.error(503) == AUTH_NOT_CONFIGURED } -> DeleteOutcome.Deleted
                 else -> DeleteOutcome.Failed(envelope(raw.text).error(raw.code))
             }
         } catch (e: IOException) {
