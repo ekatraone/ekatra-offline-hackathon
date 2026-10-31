@@ -1,0 +1,176 @@
+diff --git a/app/src/main/java/org/ekatra/alfred/data/local/SyncQueueDao.kt b/app/src/main/java/org/ekatra/alfred/data/local/SyncQueueDao.kt
+index a538e04..7f7eb3a 100644
+--- a/app/src/main/java/org/ekatra/alfred/data/local/SyncQueueDao.kt
++++ b/app/src/main/java/org/ekatra/alfred/data/local/SyncQueueDao.kt
+@@ -12,9 +12,21 @@ interface SyncQueueDao {
+     @Query("SELECT * FROM sync_queue ORDER BY createdAt ASC LIMIT :limit")
+     suspend fun getPending(limit: Int = 50): List<SyncQueueItem>
+ 
++    @Query("SELECT * FROM sync_queue WHERE type = :type ORDER BY createdAt ASC LIMIT :limit")
++    suspend fun getPendingByType(type: String, limit: Int = 50): List<SyncQueueItem>
++
++    @Query("SELECT * FROM sync_queue WHERE type IN (:types) ORDER BY createdAt ASC LIMIT :limit")
++    suspend fun getPendingByTypes(types: List<String>, limit: Int = 50): List<SyncQueueItem>
++
+     @Query("SELECT COUNT(*) FROM sync_queue")
+     fun getPendingCount(): Flow<Int>
+ 
++    @Query("SELECT COUNT(*) FROM sync_queue WHERE type = :type")
++    fun countByType(type: String): Flow<Int>
++
++    @Query("SELECT COUNT(*) FROM sync_queue WHERE type IN (:types)")
++    fun countByTypes(types: List<String>): Flow<Int>
++
+     @Delete
+     suspend fun delete(item: SyncQueueItem)
+ 
+diff --git a/app/src/main/java/org/ekatra/alfred/data/sync/SyncManager.kt b/app/src/main/java/org/ekatra/alfred/data/sync/SyncManager.kt
+index b8512a7..6d993f6 100644
+--- a/app/src/main/java/org/ekatra/alfred/data/sync/SyncManager.kt
++++ b/app/src/main/java/org/ekatra/alfred/data/sync/SyncManager.kt
+@@ -35,11 +35,12 @@ class SyncManager @Inject constructor(
+ ) {
+     companion object {
+         private const val TAG = "SyncManager"
++        const val TYPE_CHAT_ANALYTICS = "chat_analytics"
+     }
+ 
+     private val gson = Gson()
+ 
+-    val pendingSyncCount: Flow<Int> = syncQueueDao.getPendingCount()
++    val pendingSyncCount: Flow<Int> = syncQueueDao.countByType(TYPE_CHAT_ANALYTICS)
+ 
+     fun isOnline(): Boolean {
+         val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+@@ -54,12 +55,14 @@ class SyncManager @Inject constructor(
+             return
+         }
+         val payload = gson.toJson(analytics)
+-        syncQueueDao.insert(SyncQueueItem(type = "chat_analytics", payload = payload))
++        syncQueueDao.insert(SyncQueueItem(type = TYPE_CHAT_ANALYTICS, payload = payload))
+         Log.d(TAG, "Enqueued analytics for session ${analytics.sessionId}")
+     }
+ 
+     /**
+-     * Process all pending sync items. Called by SyncWorker.
++     * Process pending analytics items. Called by SyncWorker.
++     * Only [TYPE_CHAT_ANALYTICS] rows are read or deleted here; other types (learner_event,
++     * lesson_request) belong to LearnerSyncManager and must survive this call.
+      */
+     suspend fun syncPending() {
+         if (!consentManager.hasCollectionConsent()) {
+@@ -72,21 +75,17 @@ class SyncManager @Inject constructor(
+             return
+         }
+ 
+-        val pending = syncQueueDao.getPending(50)
++        val pending = syncQueueDao.getPendingByType(TYPE_CHAT_ANALYTICS, 50)
+         Log.d(TAG, "Syncing ${pending.size} pending items")
+ 
+         for (item in pending) {
+             try {
+-                when (item.type) {
+-                    "chat_analytics" -> {
+-                        val analytics = gson.fromJson(item.payload, ChatAnalytics::class.java)
+-                        firestore.collection("users").document(uid)
+-                            .collection("analytics")
+-                            .document(analytics.sessionId)
+-                            .set(analytics)
+-                            .await()
+-                    }
+-                }
++                val analytics = gson.fromJson(item.payload, ChatAnalytics::class.java)
++                firestore.collection("users").document(uid)
++                    .collection("analytics")
++                    .document(analytics.sessionId)
++                    .set(analytics)
++                    .await()
+                 syncQueueDao.delete(item)
+                 Log.d(TAG, "Synced item ${item.id}")
+             } catch (e: Exception) {
+diff --git a/app/src/test/java/org/ekatra/alfred/data/SyncManagerTest.kt b/app/src/test/java/org/ekatra/alfred/data/SyncManagerTest.kt
+index 8553012..2ab4838 100644
+--- a/app/src/test/java/org/ekatra/alfred/data/SyncManagerTest.kt
++++ b/app/src/test/java/org/ekatra/alfred/data/SyncManagerTest.kt
+@@ -80,7 +80,7 @@ class SyncManagerTest {
+         syncManager.syncPending()
+ 
+         // Should not attempt to read from sync queue
+-        coVerify(exactly = 0) { syncQueueDao.getPending(any()) }
++        coVerify(exactly = 0) { syncQueueDao.getPendingByType(any(), any()) }
+     }
+ 
+     @Test
+@@ -100,7 +100,7 @@ class SyncManagerTest {
+         syncManager = SyncManager(context, syncQueueDao, firestore, auth, consent)
+         syncManager.syncPending()
+ 
+-        coVerify(exactly = 0) { syncQueueDao.getPending(any()) }
++        coVerify(exactly = 0) { syncQueueDao.getPendingByType(any(), any()) }
+     }
+ 
+     private fun goOnline(uid: String) {
+@@ -136,13 +136,13 @@ class SyncManagerTest {
+     fun `syncPending uploads nothing without collection consent`() = runTest {
+         goOnline("uid-1")
+         every { consent.hasCollectionConsent() } returns false
+-        coEvery { syncQueueDao.getPending(any()) } returns listOf(
++        coEvery { syncQueueDao.getPendingByType(any(), any()) } returns listOf(
+             SyncQueueItem(id = 1, type = "chat_analytics", payload = "{}")
+         )
+ 
+         syncManager.syncPending()
+ 
+-        coVerify(exactly = 0) { syncQueueDao.getPending(any()) }
++        coVerify(exactly = 0) { syncQueueDao.getPendingByType(any(), any()) }
+         verify(exactly = 0) { firestore.collection(any()) }
+         coVerify(exactly = 0) { syncQueueDao.delete(any()) }
+     }
+@@ -155,7 +155,7 @@ class SyncManagerTest {
+             type = "chat_analytics",
+             payload = com.google.gson.Gson().toJson(analytics("session-1"))
+         )
+-        coEvery { syncQueueDao.getPending(any()) } returns listOf(item)
++        coEvery { syncQueueDao.getPendingByType(any(), any()) } returns listOf(item)
+         every {
+             firestore.collection("users").document("uid-1").collection("analytics")
+                 .document("session-1").set(any())
+@@ -169,4 +169,38 @@ class SyncManagerTest {
+         }
+         coVerify { syncQueueDao.delete(item) }
+     }
++
++    @Test
++    fun `syncPending only reads analytics rows so learner events survive`() = runTest {
++        goOnline("uid-1")
++        val analyticsItem = SyncQueueItem(
++            id = 1,
++            type = "chat_analytics",
++            payload = com.google.gson.Gson().toJson(analytics("session-1"))
++        )
++        val learnerEvent = SyncQueueItem(id = 2, type = "learner_event", payload = "{}")
++        val lessonRequest = SyncQueueItem(id = 3, type = "lesson_request", payload = "{}")
++        // A faithful fake: the DAO filters by type, as the real @Query does.
++        val all = listOf(analyticsItem, learnerEvent, lessonRequest)
++        coEvery { syncQueueDao.getPendingByType(any(), any()) } answers {
++            all.filter { it.type == firstArg<String>() }
++        }
++        coEvery { syncQueueDao.getPending(any()) } returns all
++        every {
++            firestore.collection("users").document("uid-1").collection("analytics")
++                .document("session-1").set(any())
++        } returns Tasks.forResult(null)
++
++        syncManager.syncPending()
++
++        coVerify { syncQueueDao.delete(analyticsItem) }
++        coVerify(exactly = 0) { syncQueueDao.delete(learnerEvent) }
++        coVerify(exactly = 0) { syncQueueDao.delete(lessonRequest) }
++        coVerify(exactly = 0) { syncQueueDao.deleteAll() }
++    }
++
++    @Test
++    fun `pendingSyncCount counts analytics only`() = runTest {
++        verify { syncQueueDao.countByType("chat_analytics") }
++    }
+ }
