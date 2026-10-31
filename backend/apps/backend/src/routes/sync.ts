@@ -25,6 +25,7 @@ import {
   buildBundle,
   applyEvents,
   getMe,
+  isUuid,
 } from '../services/syncService.js';
 
 export interface SyncRouterDeps {
@@ -34,28 +35,56 @@ export interface SyncRouterDeps {
 
 type SyncRequest = Request & { syncLearner?: SyncLearner };
 
-function learnerAuth(req: SyncRequest, res: Response, next: NextFunction): void {
-  const header = req.headers.authorization;
-  if (!header || !header.startsWith('Bearer ')) {
-    res.status(401).json({ success: false, error: 'Missing or invalid Authorization header' });
-    return;
-  }
-  const secret = process.env.JWT_SECRET;
-  if (!secret) {
-    res.status(500).json({ success: false, error: 'Server auth is not configured' });
-    return;
-  }
-  try {
-    const payload = jwt.verify(header.slice(7), secret, { algorithms: ['HS256'] }) as any;
-    if (payload?.role !== 'learner' || !payload.learnerId || !payload.organizationId) {
+/**
+ * Verifies the learner JWT and that the learner still exists in the token's organization,
+ * so a token for a deleted learner (or a forged id) stops working immediately.
+ */
+function learnerAuth(db: SyncDb) {
+  return async (req: SyncRequest, res: Response, next: NextFunction): Promise<void> => {
+    const header = req.headers.authorization;
+    if (!header || !header.startsWith('Bearer ')) {
+      res.status(401).json({ success: false, error: 'Missing or invalid Authorization header' });
+      return;
+    }
+    const secret = process.env.JWT_SECRET;
+    if (!secret) {
+      res.status(500).json({ success: false, error: 'Server auth is not configured' });
+      return;
+    }
+    let payload: any;
+    try {
+      payload = jwt.verify(header.slice(7), secret, { algorithms: ['HS256'] });
+    } catch {
+      res.status(401).json({ success: false, error: 'Invalid or expired token' });
+      return;
+    }
+    // Tokens must expire, and carry well-formed ids (they are used as SQL uuid parameters).
+    if (
+      payload?.role !== 'learner' ||
+      typeof payload.exp !== 'number' ||
+      !isUuid(payload.learnerId) ||
+      !isUuid(payload.organizationId)
+    ) {
       res.status(401).json({ success: false, error: 'Invalid token' });
+      return;
+    }
+    try {
+      const found = await db.raw(`SELECT 1 FROM learners WHERE id = $1 AND organization_id = $2`, [
+        payload.learnerId,
+        payload.organizationId,
+      ]);
+      if (!found.rows.length) {
+        res.status(401).json({ success: false, error: 'Unknown learner' });
+        return;
+      }
+    } catch (err) {
+      logger.error('sync auth lookup failed', err);
+      res.status(500).json({ success: false, error: 'Internal error' });
       return;
     }
     req.syncLearner = { id: payload.learnerId, organizationId: payload.organizationId, phone: payload.phone };
     next();
-  } catch {
-    res.status(401).json({ success: false, error: 'Invalid or expired token' });
-  }
+  };
 }
 
 const perLearner = (max: number, windowMs: number) =>
@@ -79,7 +108,7 @@ function fail(res: Response, err: unknown, what: string): void {
 
 export function createSyncRouter({ db, generator }: SyncRouterDeps): Router {
   const router = Router();
-  router.use(learnerAuth);
+  router.use(learnerAuth(db));
 
   router.get('/me', perLearner(60, 60_000), async (req: SyncRequest, res: Response) => {
     try {
