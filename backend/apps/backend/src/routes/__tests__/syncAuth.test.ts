@@ -86,6 +86,24 @@ test('auth: a token whose learner no longer exists is rejected', async () => {
   knownLearner = true;
 });
 
+test('lessons/request: the socket timeout is 330 s, above the client\'s 300 s', async () => {
+  const { IncomingMessage } = await import('node:http');
+  const original = IncomingMessage.prototype.setTimeout;
+  const seen: number[] = [];
+  IncomingMessage.prototype.setTimeout = function (this: any, ms: number, cb?: any) { seen.push(ms); return original.call(this, ms, cb); } as any;
+  try {
+    knownLearner = true;
+    await fetch(`${base}/api/sync/lessons/request`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${sign({})}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ topic: 'Compound interest', clientRequestId: '00000000-0000-4000-8000-0000000000e9' }),
+    });
+  } finally {
+    IncomingMessage.prototype.setTimeout = original;
+  }
+  assert.ok(seen.includes(330_000), `setTimeout calls: ${seen.join(',')}`);
+});
+
 test('auth: a non-learner role is rejected', async () => {
   assert.equal((await call(sign({ role: 'admin' }))).status, 401);
 });

@@ -1,7 +1,7 @@
 /**
  * Sync service — backend side of the Maya offline app.
  *
- * Micro lessons are generated on demand (Muse Spark), downloaded as a bundle the
+ * Micro lessons are generated on demand (Muse), downloaded as a bundle the
  * phone can grade offline, and learner events come back in idempotent batches.
  *
  * The database is injected (anything with `raw(sql, params)`), so handlers and
@@ -9,6 +9,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { isMediaPath, mediaIdFromPath, publicBaseUrl } from '@ekatra/messaging';
 import { computeProfile } from './learnerProfile.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -248,7 +249,17 @@ async function enroll(db: SyncDb, learnerId: string, courseId: string): Promise<
 
 // ── Bundle ─────────────────────────────────────────────────────────────────
 
-export async function buildBundle(db: SyncDb, learner: SyncLearner, courseId: string): Promise<Bundle> {
+/**
+ * `baseUrl` makes stored relative media paths absolute; it defaults to PUBLIC_BASE_URL /
+ * WEBHOOK_BASE_URL at call time. Stored values that aren't `/api/sync/media/<uuid>` become null.
+ */
+export async function buildBundle(
+  db: SyncDb,
+  learner: SyncLearner,
+  courseId: string,
+  baseUrl: string | null = publicBaseUrl(),
+): Promise<Bundle> {
+  const absolute = (stored: unknown): string | null => (isMediaPath(stored) && baseUrl ? `${baseUrl}${stored}` : null);
   if (!isUuid(courseId)) throw new SyncError(404, 'Course not found');
 
   const found = await db.raw(
@@ -305,20 +316,27 @@ export async function buildBundle(db: SyncDb, learner: SyncLearner, courseId: st
     day: l.day_number ?? 1,
     order: l.sequence_order,
     // Review lessons never carry an image; media_url is only ever set on modules we generated.
-    imageUrl: l.content_type === 'review' ? null : l.media_url ?? null,
+    imageUrl: l.content_type === 'review' ? null : absolute(l.media_url),
     questions: byLesson.get(l.id) ?? [],
   }));
 
   const settings = course.settings ?? {};
+  // The version covers the image ids (not the base URL), so it changes when late images attach.
+  const imageIds = {
+    cover: mediaIdFromPath(settings.coverImageUrl),
+    lessons: lessonRows.map((l: any) => (l.content_type === 'review' ? null : mediaIdFromPath(l.media_url))),
+  };
   return {
-    version: createHash('sha1').update(JSON.stringify({ t: course.title, lessons })).digest('hex'),
+    version: createHash('sha1')
+      .update(JSON.stringify({ t: course.title, lessons: lessons.map((l) => ({ ...l, imageUrl: undefined })), imageIds }))
+      .digest('hex'),
     course: {
       id: course.id,
       title: course.title,
       description: course.description ?? '',
       language: settings.language ?? 'en',
       generator: settings.generator ?? null,
-      coverImageUrl: settings.coverImageUrl ?? null,
+      coverImageUrl: absolute(settings.coverImageUrl),
     },
     lessons,
   };
@@ -576,14 +594,18 @@ export async function getMe(db: SyncDb, learner: SyncLearner) {
       phone: learnerRow.phone,
       language: learnerRow.language ?? 'en',
     },
-    courses: courseRows.map((c: any) => ({
-      courseId: c.id,
-      title: c.title,
-      language: c.settings?.language ?? 'en',
-      status: c.status === 'completed' ? 'completed' : (c.progress ?? 0) > 0 ? 'in_progress' : 'enrolled',
-      progress: c.progress ?? 0,
-      generator: c.settings?.generator ?? null,
-    })),
+    courses: await Promise.all(
+      courseRows.map(async (c: any) => ({
+        courseId: c.id,
+        title: c.title,
+        language: c.settings?.language ?? 'en',
+        status: c.status === 'completed' ? 'completed' : (c.progress ?? 0) > 0 ? 'in_progress' : 'enrolled',
+        progress: c.progress ?? 0,
+        generator: c.settings?.generator ?? null,
+        // The phone refetches a stored bundle when this differs from the one it holds.
+        bundleVersion: await buildBundle(db, learner, c.id).then((b) => b.version, () => null),
+      })),
+    ),
     profile,
     lessonTitles: Object.fromEntries(titleRows.map((r: any) => [r.id, r.title])),
   };

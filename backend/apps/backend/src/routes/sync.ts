@@ -110,8 +110,16 @@ export function createSyncRouter({ db, generator }: SyncRouterDeps): Router {
   const router = Router();
 
   // Public, registered before the auth middleware: Twilio/WhatsApp fetch these by URL. The
-  // unguessable UUID is the capability; anything that isn't a UUID is a plain 404.
-  router.get('/media/:id', async (req: Request, res: Response) => {
+  // unguessable UUID is the capability; anything that isn't a UUID is a plain 404. It is exempt
+  // from the global API limiter in index.ts and has its own per-IP limit instead.
+  const mediaLimiter = rateLimit({
+    windowMs: 60_000,
+    max: 120,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, error: 'Rate limit exceeded. Please try again later.' },
+  });
+  router.get('/media/:id', mediaLimiter, async (req: Request, res: Response) => {
     try {
       if (!isUuid(req.params.id)) {
         res.status(404).json({ success: false, error: 'Not found' });
@@ -123,11 +131,15 @@ export function createSyncRouter({ db, generator }: SyncRouterDeps): Router {
         res.status(404).json({ success: false, error: 'Not found' });
         return;
       }
-      res.set({
-        'Content-Type': row.mime || 'image/jpeg',
-        'Cache-Control': 'public, max-age=31536000, immutable',
-        'Content-Length': String(row.bytes.length),
-      });
+      // Media rows are immutable, so the id itself is a perfect strong validator.
+      const etag = `"${req.params.id.toLowerCase()}"`;
+      res.set({ ETag: etag, 'Cache-Control': 'public, max-age=31536000, immutable' });
+      const ifNoneMatch = req.headers['if-none-match'];
+      if (ifNoneMatch && ifNoneMatch.split(',').some((t) => t.trim() === etag || t.trim() === '*')) {
+        res.status(304).end();
+        return;
+      }
+      res.set({ 'Content-Type': row.mime || 'image/jpeg', 'Content-Length': String(row.bytes.length) });
       res.send(row.bytes);
     } catch (err) {
       fail(res, err, 'media');
@@ -147,7 +159,7 @@ export function createSyncRouter({ db, generator }: SyncRouterDeps): Router {
   router.post('/lessons/request', perLearner(20, 60_000), async (req: SyncRequest, res: Response) => {
     try {
       // Muse can take up to 240 s; keep the socket open past node's default.
-      req.setTimeout(290_000);
+      req.setTimeout(330_000); // above the client's 300 s read timeout
       const data = await requestLesson(db, generator, req.syncLearner!, req.body ?? {});
       res.json({ success: true, data });
     } catch (err) {

@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import {
   requestLesson,
   buildBundle,
+  getMe,
   applyEvents,
   SyncError,
   MAX_EVENTS_PER_BATCH,
@@ -24,6 +25,8 @@ const LESSON1 = '00000000-0000-4000-8000-0000000000d1';
 const LESSON2 = '00000000-0000-4000-8000-0000000000d2';
 const Q1 = '00000000-0000-4000-8000-0000000000e1';
 const Q2 = '00000000-0000-4000-8000-0000000000e2';
+const MEDIA_COVER = '00000000-0000-4000-8000-0000000000a1';
+const MEDIA_M1 = '00000000-0000-4000-8000-0000000000a2';
 const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 
 interface Req { status: string; course_id: string | null; updatedAt: number; attempt: number }
@@ -40,14 +43,14 @@ function makeDb(opts: { authored?: boolean; enrolled?: boolean; otherOrg?: boole
     id: COURSE,
     title: 'Compound interest',
     description: 'd',
-    settings: { language: 'en', coverImageUrl: 'https://demo.example/api/sync/media/cover1', generator: { provider: 'meta', model: 'muse-wonder-1.0' } },
+    settings: { language: 'en', coverImageUrl: `/api/sync/media/${MEDIA_COVER}`, generator: { provider: 'meta', model: 'muse-wonder-1.0' } },
     source: opts.authored ? 'authored' : 'ai_generated',
     fsm_definition_id: null,
     organization_id: opts.otherOrg ? 'other-org' : ORG,
   };
   const lessons = [
-    { id: LESSON1, title: 'One', content: 'a', content_type: 'text', sequence_order: 1, day_number: 1, course_id: COURSE, media_url: 'https://demo.example/api/sync/media/m1' },
-    { id: LESSON2, title: 'Day 1 Review', content: '', content_type: 'review', sequence_order: 2, day_number: null, course_id: COURSE, media_url: 'https://demo.example/api/sync/media/should-not-appear' },
+    { id: LESSON1, title: 'One', content: 'a', content_type: 'text', sequence_order: 1, day_number: 1, course_id: COURSE, media_url: `/api/sync/media/${MEDIA_M1}` },
+    { id: LESSON2, title: 'Day 1 Review', content: '', content_type: 'review', sequence_order: 2, day_number: null, course_id: COURSE, media_url: `/api/sync/media/${uuid(777)}` },
   ];
   const questions = [
     // options stored as a JSON string on purpose: JSONB can come back stringified
@@ -100,6 +103,11 @@ function makeDb(opts: { authored?: boolean; enrolled?: boolean; otherOrg?: boole
         return { rows: [{ attempt: r.attempt }] };
       }
       if (has('INSERT INTO enrollments')) { calls.enrollInserts++; return { rows: [] }; }
+      if (has('SELECT id, name, phone, language')) return { rows: [{ id: LEARNER.id, name: 'Demo', phone: '+910000000042', language: 'en' }] };
+      if (has('c.settings, e.status, e.progress')) {
+        return { rows: enrolled ? [{ id: COURSE, title: course.title, settings: course.settings, status: 'enrolled', progress: 0 }] : [] };
+      }
+      if (has('SELECT id, title FROM lessons WHERE id = ANY')) return { rows: [] };
       if (has('FROM enrollments e JOIN courses c')) {
         return { rows: enrolled && p[1] === COURSE ? [course] : [] };
       }
@@ -320,15 +328,15 @@ test('request: after 3 failed attempts the request is dropped with 422 generatio
 // ── bundle ─────────────────────────────────────────────────────────────────
 
 test('bundle: parses stringified options, uppercases the key, sorts and labels review lessons', async () => {
-  const b = await buildBundle(makeDb(), LEARNER, COURSE);
+  const b = await buildBundle(makeDb(), LEARNER, COURSE, 'https://demo.example');
   assert.equal(b.lessons[0].kind, 'module');
   assert.equal(b.lessons[1].kind, 'review');
   assert.equal(b.lessons[1].day, 1); // NULL day_number → 1
   assert.deepEqual(b.lessons[0].questions[0].options, ['a', 'b', 'c', 'd']);
   assert.equal(b.lessons[0].questions[0].correctAnswer, 'B');
   assert.deepEqual(b.course.generator, { provider: 'meta', model: 'muse-wonder-1.0' });
-  assert.equal(b.course.coverImageUrl, 'https://demo.example/api/sync/media/cover1');
-  assert.equal(b.lessons[0].imageUrl, 'https://demo.example/api/sync/media/m1');
+  assert.equal(b.course.coverImageUrl, `https://demo.example/api/sync/media/${MEDIA_COVER}`);
+  assert.equal(b.lessons[0].imageUrl, `https://demo.example/api/sync/media/${MEDIA_M1}`);
   assert.equal(b.lessons[1].imageUrl, null); // review lessons never carry an image
   assert.match(b.version, /^[0-9a-f]{40}$/);
 });
@@ -434,4 +442,59 @@ test('bundle: image URLs are null when a course has no images', async () => {
   const b = await buildBundle(db, LEARNER, COURSE);
   assert.equal(b.course.coverImageUrl, null);
   assert.deepEqual(b.lessons.map((l) => l.imageUrl), [null, null]);
+});
+
+test('bundle: stored values that are not a relative media path (old absolute URLs, junk) become null', async () => {
+  const db: any = makeDb(); const raw = db.raw.bind(db);
+  db.raw = async (sql: string, q: any[]) => {
+    const r = await raw(sql, q);
+    if (sql.includes('FROM enrollments e JOIN courses c')) {
+      return { rows: r.rows.map((c: any) => ({ ...c, settings: { ...c.settings, coverImageUrl: `http://localhost:3001/api/sync/media/${MEDIA_COVER}` } })) };
+    }
+    if (sql.includes('FROM lessons WHERE course_id')) return { rows: r.rows.map((l: any) => ({ ...l, media_url: 'javascript:alert(1)' })) };
+    return r;
+  };
+  const b = await buildBundle(db, LEARNER, COURSE, 'https://demo.example');
+  assert.equal(b.course.coverImageUrl, null);
+  assert.deepEqual(b.lessons.map((l) => l.imageUrl), [null, null]);
+});
+
+test('bundle: without a usable base URL, image URLs are null rather than relative', async () => {
+  const b = await buildBundle(makeDb(), LEARNER, COURSE, null);
+  assert.equal(b.course.coverImageUrl, null);
+  assert.equal(b.lessons[0].imageUrl, null);
+});
+
+test('bundle: the version covers image ids (changes when a late image attaches) but not the base URL', async () => {
+  const a = await buildBundle(makeDb(), LEARNER, COURSE, 'https://one.example');
+  const sameElsewhere = await buildBundle(makeDb(), LEARNER, COURSE, 'https://two.example');
+  assert.equal(a.version, sameElsewhere.version);
+
+  const withLateImage: any = makeDb(); const raw = withLateImage.raw.bind(withLateImage);
+  withLateImage.raw = async (sql: string, q: any[]) => {
+    const r = await raw(sql, q);
+    if (sql.includes('FROM lessons WHERE course_id')) {
+      return { rows: r.rows.map((l: any) => l.id === LESSON1 ? { ...l, media_url: `/api/sync/media/${uuid(888)}` } : l) };
+    }
+    return r;
+  };
+  const later = await buildBundle(withLateImage, LEARNER, COURSE, 'https://one.example');
+  assert.notEqual(later.version, a.version);
+
+  const noCover: any = makeDb(); const raw2 = noCover.raw.bind(noCover);
+  noCover.raw = async (sql: string, q: any[]) => {
+    const r = await raw2(sql, q);
+    if (sql.includes('FROM enrollments e JOIN courses c')) return { rows: r.rows.map((c: any) => ({ ...c, settings: { language: 'en' } })) };
+    return r;
+  };
+  assert.notEqual((await buildBundle(noCover, LEARNER, COURSE, 'https://one.example')).version, a.version);
+});
+
+test('/me: every course entry carries the bundleVersion of its bundle', async () => {
+  const db = makeDb();
+  const me = await getMe(db, LEARNER);
+  const bundle = await buildBundle(db, LEARNER, COURSE);
+  assert.equal(me.courses.length, 1);
+  assert.equal(me.courses[0].bundleVersion, bundle.version);
+  assert.match(me.courses[0].bundleVersion as string, /^[0-9a-f]{40}$/);
 });

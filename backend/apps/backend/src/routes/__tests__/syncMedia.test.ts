@@ -41,6 +41,27 @@ test('media: a non-UUID id or an unknown id is a 404', async () => {
   assert.equal((await fetch(`${base}/api/sync/media/00000000-0000-4000-8000-0000000000f2`)).status, 404);
 });
 
+test('media: sends an ETag and answers If-None-Match with 304 and no body', async () => {
+  const first = await fetch(`${base}/api/sync/media/${ID}`);
+  const etag = first.headers.get('etag');
+  assert.equal(etag, `"${ID}"`);
+  const second = await fetch(`${base}/api/sync/media/${ID}`, { headers: { 'If-None-Match': etag! } });
+  assert.equal(second.status, 304);
+  assert.equal((await second.arrayBuffer()).byteLength, 0);
+  assert.equal(second.headers.get('cache-control'), 'public, max-age=31536000, immutable');
+  const stale = await fetch(`${base}/api/sync/media/${ID}`, { headers: { 'If-None-Match': '"other"' } });
+  assert.equal(stale.status, 200);
+});
+
+test('media: has its own per-IP limit of 120 requests per minute', async () => {
+  let limited = 0;
+  for (let i = 0; i < 130; i++) {
+    const res = await fetch(`${base}/api/sync/media/${ID}`, { headers: { 'If-None-Match': `"${ID}"` } });
+    if (res.status === 429) limited++;
+  }
+  assert.ok(limited >= 1, 'expected a 429 once the per-minute limit is exceeded');
+});
+
 test('media: the rest of the sync API still requires auth', async () => {
   assert.equal((await fetch(`${base}/api/sync/me`)).status, 401);
 });
