@@ -10,6 +10,7 @@ import org.ekatra.alfred.data.AppSettings
 import org.ekatra.alfred.data.local.SyncQueueDao
 import org.ekatra.alfred.data.local.UserProfileDao
 import org.ekatra.alfred.data.repository.ChatRepository
+import org.ekatra.alfred.data.sync.SyncManager
 import org.ekatra.alfred.lessons.LearnerSyncManager
 import org.ekatra.alfred.lessons.LessonProgressStore
 import org.ekatra.alfred.lessons.LessonStore
@@ -42,8 +43,9 @@ class FirebaseAccountRemote @Inject constructor(
 
 /**
  * Local side of account deletion: chat history, the cached profile row, cached settings, and the
- * learner's lessons (downloaded bundles, local progress, and unsynced quiz answers and lesson requests).
- * ("Delete Cloud Data" is separate and only clears queued analytics.)
+ * learner's lessons (downloaded bundles, local progress, and unsynced quiz answers and lesson requests),
+ * and every queued sync row, including analytics. ("Delete Cloud Data" is separate and only clears
+ * queued analytics.)
  */
 class RoomAccountData @Inject constructor(
     private val chats: ChatRepository,
@@ -58,6 +60,8 @@ class RoomAccountData @Inject constructor(
         chats.deleteAllSessions()
         profiles.deleteProfile(uid)
         settings.clearAllExceptConsent()
+        // Queued analytics too: nothing a deleted account queued may upload under another uid.
+        syncQueue.deleteByType(SyncManager.TYPE_CHAT_ANALYTICS)
         syncQueue.deleteByType(LearnerSyncManager.TYPE_LEARNER_EVENT)
         syncQueue.deleteByType(LearnerSyncManager.TYPE_LESSON_REQUEST)
         withContext(Dispatchers.IO) {

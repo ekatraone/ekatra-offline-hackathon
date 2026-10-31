@@ -73,6 +73,17 @@ class RoomAccountDataTest {
     }
 
     @Test
+    fun `queued chat analytics are cleared too so nothing uploads under another uid`() = runBlocking {
+        queue.insert(SyncQueueItem(type = "chat_analytics", payload = "{}"))
+        queue.insert(SyncQueueItem(type = "chat_analytics", payload = "{}"))
+        queue.insert(SyncQueueItem(type = "learner_event", payload = "{}"))
+
+        data.clear("uid1")
+
+        assertTrue("sync queue should be empty but has ${queue.items.map { it.type }}", queue.items.isEmpty())
+    }
+
+    @Test
     fun `a restart after deletion finds nothing`() = runBlocking {
         lessons.save(sampleBundle())
         progress.markCompleted("lesson-1")
