@@ -1,0 +1,67 @@
+diff --git a/apps/backend/src/services/__tests__/courseGenerator.test.ts b/apps/backend/src/services/__tests__/courseGenerator.test.ts
+index 527ffe24..f29901dd 100644
+--- a/apps/backend/src/services/__tests__/courseGenerator.test.ts
++++ b/apps/backend/src/services/__tests__/courseGenerator.test.ts
+@@ -43,3 +43,62 @@ test('keeps the 80% title-word overlap rule', () => {
+   assert.equal(isReusableCourse(aiCourse(), 'marketing fundamentals', 'en'), false);
+   assert.equal(isReusableCourse(aiCourse(), 'C++', 'en'), false); // no words > 3 letters
+ });
++
++// ── micro size / force ─────────────────────────────────────────────────────
++
++import { CourseGeneratorService, resolveCourseSize } from '../courseGenerator.js';
++
++function stubbedGenerator(existing: any = null) {
++  const svc: any = new CourseGeneratorService();
++  const seen = { llm: [] as any[], findExisting: 0, saved: [] as any[] };
++  svc.findExistingCourse = async () => { seen.findExisting++; return existing; };
++  svc.callLLM = async (...args: any[]) => { seen.llm.push(args); return { title: 't', description: 'd', days: [] }; };
++  svc.saveToDB = async (...args: any[]) => { seen.saved.push(args); return { id: 'new-course' }; };
++  return { svc: svc as CourseGeneratorService, seen };
++}
++
++test('micro size generates 1 day × 3 modules even when more were requested', async () => {
++  const { svc, seen } = stubbedGenerator();
++  await svc.generate({ topic: 'x', organizationId: 'o', size: 'micro', numDays: 5, numModules: 5 });
++  const [, , , , numDays, numModules, size] = seen.llm[0];
++  assert.deepEqual([numDays, numModules, size], [1, 3, 'micro']);
++});
++
++test('standard size keeps the 3×3 minimum clamp', async () => {
++  const { svc, seen } = stubbedGenerator();
++  await svc.generate({ topic: 'x', organizationId: 'o', size: 'standard', numDays: 1, numModules: 1 });
++  const [, , , , numDays, numModules] = seen.llm[0];
++  assert.deepEqual([numDays, numModules], [3, 3]);
++});
++
++test('force skips the existing-course check; without it an existing course is reused', async () => {
++  const forced = stubbedGenerator({ id: 'old-course' });
++  const a = await forced.svc.generate({ topic: 'x', organizationId: 'o', size: 'micro', force: true });
++  assert.equal(forced.seen.findExisting, 0);
++  assert.equal(a.id, 'new-course');
++
++  const reused = stubbedGenerator({ id: 'old-course' });
++  const b = await reused.svc.generate({ topic: 'x', organizationId: 'o', size: 'micro' });
++  assert.equal(b.id, 'old-course');
++  assert.equal(reused.seen.llm.length, 0);
++});
++
++test('provider is passed through to the LLM call and the saved course', async () => {
++  const { svc, seen } = stubbedGenerator();
++  await svc.generate({ topic: 'x', organizationId: 'o', size: 'micro', provider: 'meta', force: true });
++  assert.equal(seen.llm[0][7], 'meta');
++  assert.equal(seen.saved[0][4], 'meta');
++});
++
++test('COURSE_SIZE env sets the default size; an explicit size wins', () => {
++  const prev = process.env.COURSE_SIZE;
++  try {
++    process.env.COURSE_SIZE = 'micro';
++    assert.equal(resolveCourseSize(), 'micro');
++    assert.equal(resolveCourseSize('standard'), 'standard');
++    delete process.env.COURSE_SIZE;
++    assert.equal(resolveCourseSize(), 'standard');
++  } finally {
++    if (prev === undefined) delete process.env.COURSE_SIZE; else process.env.COURSE_SIZE = prev;
++  }
++});
