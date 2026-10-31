@@ -14,8 +14,10 @@
 
 import { Router, Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import rateLimit from 'express-rate-limit';
 import { logger } from '../lib/logger.js';
+import { E164_RE, MAX_NAME_LENGTH, findOrCreateLearnerByPhone, signLearnerToken } from '../services/learnerIdentity.js';
 import {
   SyncDb,
   SyncLearner,
@@ -145,6 +147,86 @@ export function createSyncRouter({ db, generator }: SyncRouterDeps): Router {
       fail(res, err, 'media');
     }
   });
+
+  // ── Tester sign-in (public) ────────────────────────────────────────────────
+  // Disabled (404) unless DEMO_INVITE_CODE is set. The phone number is NOT verified: anyone with
+  // the invite code can claim any number, which is acceptable for a short invited test.
+  const joinIpLimiter = rateLimit({
+    windowMs: 60 * 60_000,
+    max: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, error: 'Too many attempts. Please try again later.' },
+  });
+  // Counted only after the invite code checks out, so a stranger guessing codes against a number
+  // cannot lock that number's real owner out.
+  const joinPhoneLimiter = rateLimit({
+    windowMs: 60 * 60_000,
+    max: 5,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => (req as Request & { joinPhone?: string }).joinPhone ?? 'unknown',
+    message: { success: false, error: 'Too many attempts for this number. Please try again later.' },
+  });
+  const digest = (v: string) => createHash('sha256').update(v).digest();
+
+  router.post(
+    '/join',
+    (req: Request, res: Response, next: NextFunction) => {
+      if (!process.env.DEMO_INVITE_CODE) {
+        res.status(404).json({ success: false, error: 'Not found' });
+        return;
+      }
+      next();
+    },
+    joinIpLimiter,
+    (req: Request & { joinPhone?: string }, res: Response, next: NextFunction) => {
+      const { inviteCode, phone, name } = req.body ?? {};
+      // Constant-time comparison of fixed-length digests; the message never says which part was wrong.
+      const codeOk =
+        typeof inviteCode === 'string' && timingSafeEqual(digest(inviteCode), digest(process.env.DEMO_INVITE_CODE!));
+      if (!codeOk) {
+        res.status(401).json({ success: false, error: 'Invalid invite code' });
+        return;
+      }
+      if (typeof phone !== 'string' || !E164_RE.test(phone)) {
+        res.status(400).json({ success: false, error: 'phone must be in international format, e.g. +919876543210' });
+        return;
+      }
+      if (name !== undefined && (typeof name !== 'string' || name.trim().length > MAX_NAME_LENGTH)) {
+        res.status(400).json({ success: false, error: `name must be at most ${MAX_NAME_LENGTH} characters` });
+        return;
+      }
+      req.joinPhone = phone;
+      next();
+    },
+    joinPhoneLimiter,
+    async (req: Request, res: Response) => {
+      try {
+        const { phone, name } = req.body;
+        const secret = process.env.JWT_SECRET;
+        if (!secret) {
+          res.status(500).json({ success: false, error: 'Server auth is not configured' });
+          return;
+        }
+        const result = await findOrCreateLearnerByPhone(db, { phone, name: typeof name === 'string' ? name : null });
+        if (!result) {
+          res.status(500).json({ success: false, error: 'Sign-in is not available right now' });
+          return;
+        }
+        const { learner } = result;
+        res.json({
+          success: true,
+          data: {
+            token: signLearnerToken(learner, secret),
+            learner: { id: learner.id, name: learner.name ?? null, phone },
+          },
+        });
+      } catch (err) {
+        fail(res, err, 'join');
+      }
+    },
+  );
 
   router.use(learnerAuth(db));
 
