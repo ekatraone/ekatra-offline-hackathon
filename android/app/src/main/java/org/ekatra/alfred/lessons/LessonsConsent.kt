@@ -6,6 +6,19 @@ import kotlinx.coroutines.flow.StateFlow
 import javax.inject.Inject
 import javax.inject.Singleton
 
+/** Only Maya has Lessons, so only Maya's consent screen carries the Lessons wording. One check for both uses. */
+fun personaHasLessons(personaKey: String): Boolean = personaKey == "maya"
+
+/**
+ * What the main consent screen does for Lessons. Its text includes the same wording as the Lessons notice
+ * (on Maya), so accepting it records the current Lessons version and a fresh install is not asked twice.
+ * "Continue without analytics" records nothing here: Lessons still asks once. People who accepted an
+ * older screen, which had no Lessons line, have no Lessons version and are asked once.
+ */
+fun LessonsConsent.recordFromMainConsentScreen(accepted: Boolean, personaKey: String) {
+    if (accepted && personaHasLessons(personaKey)) accept()
+}
+
 /** Where the Lessons consent choice is kept. */
 interface LessonsConsentStore {
     fun acceptedVersion(): Int

@@ -195,6 +195,9 @@ class LearnerSyncClient internal constructor(
             when {
                 raw.code in 200..299 -> DeleteOutcome.Deleted
                 raw.code == 401 -> DeleteOutcome.Unauthorized
+                // A 404 in our own {success:false} envelope says the learner is already gone. A bare or HTML 404
+                // (a proxy mid-redeploy) says nothing about the learner, so that one is retried.
+                raw.code == 404 && envelope(raw.text).let { it.fromApi && !it.ok } -> DeleteOutcome.Deleted
                 else -> DeleteOutcome.Failed(envelope(raw.text).error(raw.code))
             }
         } catch (e: IOException) {

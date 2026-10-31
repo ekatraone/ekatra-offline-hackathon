@@ -1,0 +1,59 @@
+diff --git a/app/src/main/java/org/ekatra/alfred/PrivacyConsentActivity.kt b/app/src/main/java/org/ekatra/alfred/PrivacyConsentActivity.kt
+index 02f666d..6e871c4 100644
+--- a/app/src/main/java/org/ekatra/alfred/PrivacyConsentActivity.kt
++++ b/app/src/main/java/org/ekatra/alfred/PrivacyConsentActivity.kt
+@@ -22,6 +22,9 @@ import androidx.compose.ui.unit.dp
+ import androidx.compose.ui.unit.sp
+ import dagger.hilt.android.AndroidEntryPoint
+ import org.ekatra.alfred.data.ConsentManager
++import org.ekatra.alfred.lessons.LessonsConsent
++import org.ekatra.alfred.lessons.personaHasLessons
++import org.ekatra.alfred.lessons.recordFromMainConsentScreen
+ import org.ekatra.alfred.persona.ActivePersona
+ import javax.inject.Inject
+ 
+@@ -33,6 +36,7 @@ import javax.inject.Inject
+ class PrivacyConsentActivity : ComponentActivity() {
+ 
+     @Inject lateinit var consentManager: ConsentManager
++    @Inject lateinit var lessonsConsent: LessonsConsent
+ 
+     override fun onCreate(savedInstanceState: Bundle?) {
+         enableEdgeToEdge()
+@@ -48,11 +52,14 @@ class PrivacyConsentActivity : ComponentActivity() {
+                     PrivacyConsentScreen(
+                         onAccept = { feedbackOptIn ->
+                             consentManager.record(collection = true, feedback = feedbackOptIn)
++                            // This screen shows the Lessons wording on Maya, so accepting it covers Lessons too.
++                            lessonsConsent.recordFromMainConsentScreen(accepted = true, personaKey = ActivePersona.key)
+                             setResult(RESULT_OK)
+                             finish()
+                         },
+                         onDecline = {
+                             consentManager.record(collection = false, feedback = false)
++                            lessonsConsent.recordFromMainConsentScreen(accepted = false, personaKey = ActivePersona.key)
+                             setResult(RESULT_OK)
+                             finish()
+                         }
+@@ -106,7 +113,7 @@ fun PrivacyConsentScreen(onAccept: (Boolean) -> Unit, onDecline: () -> Unit) {
+                 BulletPoint(stringResource(R.string.privacy_collect_crashes))
+                 BulletPoint(stringResource(R.string.privacy_collect_profile))
+                 // Only Maya has Lessons; Asmaa's text is left exactly as it was.
+-                if (ActivePersona.key == "maya") BulletPoint(stringResource(R.string.privacy_collect_lessons))
++                if (personaHasLessons(ActivePersona.key)) BulletPoint(stringResource(R.string.privacy_collect_lessons))
+ 
+                 Spacer(Modifier.height(16.dp))
+                 Text(stringResource(R.string.privacy_we_dont_collect), fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index f184846..5760ee4 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -164,7 +164,7 @@
+     <string name="settings_delete_account">Delete account</string>
+     <string name="settings_delete_account_sub">Permanently delete your account and data</string>
+     <string name="delete_account_title">Delete your account?</string>
+-    <string name="delete_account_message">This permanently deletes your account, your profile and your synced data. Chats stored on this device are also removed. This cannot be undone.</string>
++    <string name="delete_account_message">This permanently deletes your account, your profile and your synced data. This also deletes your lessons and progress on Ekatra\'s servers, including your WhatsApp lesson history. Chats stored on this device are also removed. This cannot be undone.</string>
+     <string name="delete_account_confirm">Delete account</string>
+     <string name="delete_account_cancel">Cancel</string>
+     <string name="delete_account_password_title">Confirm your password</string>

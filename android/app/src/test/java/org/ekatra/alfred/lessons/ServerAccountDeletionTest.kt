@@ -172,6 +172,7 @@ class ServerAccountDeletionTest {
 
     private lateinit var server: ServerSocket
     private var status = 200
+    private var bodyOverride: String? = null
     private var lastMethod: String? = null
     private var lastPath: String? = null
     private var lastAuth: String? = null
@@ -192,7 +193,7 @@ class ServerAccountDeletionTest {
                     lastMethod = first[0]; lastPath = first[1]
                     lastAuth = null
                     while (true) { val h = line(); if (h.isEmpty()) break; if (h.lowercase().startsWith("authorization:")) lastAuth = h.substringAfter(":").trim() }
-                    val body = if (status in 200..299) """{"success":true,"data":{}}""" else """{"success":false,"error":"x"}"""
+                    val body = bodyOverride ?: if (status in 200..299) """{"success":true,"data":{}}""" else """{"success":false,"error":"x"}"""
                     it.getOutputStream().apply {
                         write("HTTP/1.1 $status X\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n$body".toByteArray()); flush()
                     }
@@ -223,7 +224,36 @@ class ServerAccountDeletionTest {
         startServer()
         status = 401
         assertEquals(DeleteOutcome.Unauthorized, client().deleteMe("t"))
-        for (code in listOf(400, 403, 404, 429, 500, 503)) {
+        for (code in listOf(400, 403, 429, 500, 503)) {
+            status = code
+            assertTrue("HTTP $code", client().deleteMe("t") is DeleteOutcome.Failed)
+        }
+    }
+
+    @Test
+    fun `a 404 in our API envelope means the learner is already gone, so it is done`() = runBlocking {
+        startServer()
+        status = 404
+        bodyOverride = """{"success":false,"error":"not_found"}"""
+
+        assertEquals(DeleteOutcome.Deleted, client().deleteMe("t"))
+    }
+
+    @Test
+    fun `a bare or html 404 is not an answer from our API and is retried`() = runBlocking {
+        startServer()
+        status = 404
+        for (body in listOf("", "<html><body>Not Found</body></html>", """{"message":"gateway"}""", "null")) {
+            bodyOverride = body
+            assertTrue("body '$body'", client().deleteMe("t") is DeleteOutcome.Failed)
+        }
+    }
+
+    @Test
+    fun `only a 404 gets that treatment, other API errors still fail`() = runBlocking {
+        startServer()
+        bodyOverride = """{"success":false,"error":"nope"}"""
+        for (code in listOf(400, 403, 409, 422, 500)) {
             status = code
             assertTrue("HTTP $code", client().deleteMe("t") is DeleteOutcome.Failed)
         }

@@ -125,6 +125,66 @@ class LessonsConsentTest {
         assertFalse(consentAt().isAccepted())   // nothing about analytics being on or off changes this
     }
 
+    // ---- the main consent screen ----
+
+    @Test
+    fun `accepting the main consent screen on Maya records the current Lessons version, so a fresh install is not asked twice`() {
+        val store = FakeConsentStore()
+        val c = LessonsConsent(store)
+        assertEquals(ConsentState.NEEDED, c.state.value)
+
+        c.recordFromMainConsentScreen(accepted = true, personaKey = "maya")
+
+        assertEquals(ConsentState.ACCEPTED, c.state.value)
+        assertEquals(LessonsConsent.CURRENT_VERSION, store.acceptedAt)
+        assertTrue(LessonsConsent(store).isAccepted())
+    }
+
+    @Test
+    fun `continuing without analytics records nothing for Lessons, which still asks once`() {
+        val c = consentAt()
+
+        c.recordFromMainConsentScreen(accepted = false, personaKey = "maya")
+
+        assertEquals(ConsentState.NEEDED, c.state.value)
+    }
+
+    @Test
+    fun `Asmaa has no Lessons, so its consent screen never records Lessons consent`() {
+        val c = consentAt()
+        c.recordFromMainConsentScreen(accepted = true, personaKey = "asmaa")
+        assertEquals(ConsentState.NEEDED, c.state.value)
+        assertFalse(personaHasLessons("asmaa"))
+        assertTrue(personaHasLessons("maya"))
+    }
+
+    @Test
+    fun `someone who accepted the old screen has no Lessons version and is still asked once`() {
+        // The old screen (v1) had no Lessons line and recorded nothing for Lessons.
+        val c = consentAt(accepted = 0)
+        assertEquals(ConsentState.NEEDED, c.state.value)
+        assertFalse(c.isAccepted())
+        // Accepting the new Lessons notice is what records it.
+        c.accept()
+        assertTrue(c.isAccepted())
+    }
+
+    @Test
+    fun `a decline of the Lessons notice is not undone by a later main-screen decline`() {
+        val c = consentAt()
+        c.decline()
+        c.recordFromMainConsentScreen(accepted = false, personaKey = "maya")
+        assertEquals(ConsentState.DECLINED, c.state.value)
+    }
+
+    @Test
+    fun `the consent screen wires accept to the Lessons record and decline to a no-op, using the same Maya check as the bullet`() {
+        val screen = res("main/java/org/ekatra/alfred/PrivacyConsentActivity.kt")
+        assertTrue(screen.contains("lessonsConsent.recordFromMainConsentScreen(accepted = true, personaKey = ActivePersona.key)"))
+        assertTrue(screen.contains("lessonsConsent.recordFromMainConsentScreen(accepted = false, personaKey = ActivePersona.key)"))
+        assertTrue(screen.contains("if (personaHasLessons(ActivePersona.key)) BulletPoint(stringResource(R.string.privacy_collect_lessons))"))
+    }
+
     // ---- an old version blocks the exchange; accepting allows it ----
 
     private fun provider(consent: LessonsConsent, store: FakeTokenStore = FakeTokenStore()): LearnerTokenProvider {
@@ -315,12 +375,34 @@ class LessonsConsentTest {
     @Test
     fun `the consent screen shows the Lessons line only on Maya`() {
         val screen = res("main/java/org/ekatra/alfred/PrivacyConsentActivity.kt")
-        assertTrue(screen.contains("""if (ActivePersona.key == "maya") BulletPoint(stringResource(R.string.privacy_collect_lessons))"""))
+        assertTrue(screen.contains("if (personaHasLessons(ActivePersona.key)) BulletPoint(stringResource(R.string.privacy_collect_lessons))"))
     }
 
     @Test
     fun `the declined message is short and plain`() {
         val strings = res("main/res/values/strings.xml")
         assertTrue(strings.contains("""<string name="lessons_consent_declined_title">Lessons needs this to sync</string>"""))
+    }
+
+    @Test
+    fun `the Maya deletion dialog says lessons, progress and WhatsApp history go, in one plain sentence`() {
+        val strings = res("main/res/values/strings.xml")
+        val message = Regex("""<string name="delete_account_message">(.*?)</string>""", RegexOption.DOT_MATCHES_ALL)
+            .find(strings)?.groupValues?.get(1) ?: error("delete_account_message missing")
+
+        assertTrue(message.contains("This also deletes your lessons and progress on Ekatra\\'s servers, including your WhatsApp lesson history."))
+        // The existing promises are all still there.
+        assertTrue(message.contains("permanently deletes your account"))
+        assertTrue(message.contains("Chats stored on this device are also removed"))
+        assertTrue(message.contains("This cannot be undone"))
+    }
+
+    @Test
+    fun `Asmaa's deletion text keeps its own wording`() {
+        val asmaa = res("asmaa/res/values/strings.xml")
+        val message = Regex("""<string name="delete_account_message">(.*?)</string>""", RegexOption.DOT_MATCHES_ALL).find(asmaa)?.groupValues?.get(1)
+        assertTrue("Asmaa still overrides it", message != null)
+        assertFalse(message!!.contains("WhatsApp"))
+        assertFalse(message.contains("Ekatra"))
     }
 }

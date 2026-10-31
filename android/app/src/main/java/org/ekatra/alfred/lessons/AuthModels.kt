@@ -40,7 +40,7 @@ data class VerifyResponse(val firebaseCustomToken: String? = null)
 
 /** `DELETE /api/sync/me`: erase the learner, their progress and events on the server. */
 sealed interface DeleteOutcome {
-    /** 200: erased. */
+    /** 200: erased, or a 404 from our API: the learner is already gone. */
     data object Deleted : DeleteOutcome
     /** 401: the token is no longer valid, so there is nothing this token can still erase or reach. */
     data object Unauthorized : DeleteOutcome
