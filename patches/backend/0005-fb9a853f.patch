@@ -1,0 +1,31 @@
+diff --git a/apps/backend/src/index.ts b/apps/backend/src/index.ts
+index 0bc2d345..f367ba61 100644
+--- a/apps/backend/src/index.ts
++++ b/apps/backend/src/index.ts
+@@ -58,6 +58,7 @@ import { analyticsRouter } from './routes/analytics.js';
+ import { adminRouter } from './routes/admin.js';
+ import { usersRouter } from './routes/users.js';
+ import { fsmRouter } from './routes/fsm.js';
++import { createDefaultSyncRouter } from './routes/sync.js';
+ import { authMiddleware } from './middleware/auth.js';
+ 
+ // Logger
+@@ -80,7 +81,7 @@ const captureRawBody = (req: any, _res: unknown, buffer: Buffer) => { (req as ex
+ app.use('/api/webhooks',
+   express.json({ limit: '1mb', verify: captureRawBody }),
+   express.urlencoded({ extended: false, limit: '1mb' }));
+-app.use(['/api/fsm', '/api/courses'], express.json({ limit: '256kb', verify: captureRawBody }));
++app.use(['/api/fsm', '/api/courses', '/api/sync'], express.json({ limit: '256kb', verify: captureRawBody }));
+ app.use(express.json({
+   limit: '10kb',
+   verify: captureRawBody,
+@@ -124,6 +125,9 @@ app.use('/api/auth', authRouter);
+ app.use('/api/webhooks', webhookRouter);
+ app.use('/api/certificates', certificatesRouter);
+ 
++// Routes — Maya offline app sync (learner JWT, verified in-router); must precede the catch-all /api mount below
++app.use('/api/sync', createDefaultSyncRouter());
++
+ // Routes — protected (require valid JWT)
+ app.use('/api', authMiddleware, analyticsRouter);
+ app.use('/api/admin', authMiddleware, adminRouter);
