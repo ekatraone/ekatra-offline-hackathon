@@ -215,3 +215,47 @@ test('auth/account: it is public (no bearer token needed) and uses the same sing
   const { DELETE_ACCOUNT_SQL } = await import('../../services/accountDeletion.js');
   assert.equal(statements[0], DELETE_ACCOUNT_SQL);
 });
+
+// ── POST /api/sync/auth/account/delete — the same operation for clients that cannot send a DELETE body ──
+
+test('auth/account/delete (POST): same handler and responses as DELETE', async () => {
+  const { db, base } = await startApp([
+    { phone: '919876543210', whatsapp_id: '919876543210', name: 'Asha' },
+    { phone: 'fb:AbC123', name: 'Mira' },
+  ]);
+  const post = (claims: object | string) =>
+    fetch(`${base}/auth/account/delete`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idToken: typeof claims === 'string' ? claims : JSON.stringify(claims) }) });
+
+  const wa = await post({ uid: 'wa:919876543210', ...custom });
+  assert.equal(wa.status, 200);
+  assert.deepEqual(await wa.json(), { success: true, deleted: true, data: { deleted: true } });
+  const fb: any = await (await post({ uid: 'AbC123', ...google })).json();
+  assert.equal(fb.deleted, true);
+  assert.equal(db.learners.length, 0);
+
+  const again: any = await (await post({ uid: 'AbC123', ...google })).json();
+  assert.deepEqual(again, { success: true, deleted: false, data: { deleted: false } });
+  assert.equal((await post('not-a-token')).status, 401);
+  assert.equal((await fetch(`${base}/auth/account/delete`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 400);
+});
+
+test('auth/account/delete (POST): a spoofed wa: uid from Google deletes nothing, and revocation is not checked', async () => {
+  const { db, base, firebase } = await startApp([{ phone: '919876543210', whatsapp_id: '919876543210', name: 'Victim' }]);
+  const res = await fetch(`${base}/auth/account/delete`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ idToken: JSON.stringify({ uid: 'wa:919876543210', phone: '+919876543210', ...google }) }) });
+  assert.equal(((await res.json()) as any).deleted, false);
+  assert.equal(db.learners.length, 1);
+  assert.deepEqual(firebase.calls.verify.map((c) => c.checkRevoked), [false]);
+});
+
+test('auth/account/delete (POST) and DELETE share one limit of 5 per hour per IP', async () => {
+  const { base, deleteAccount } = await startApp([]);
+  const post = () => fetch(`${base}/auth/account/delete`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ idToken: JSON.stringify({ uid: 'u', ...google }) }) });
+  const statuses: number[] = [];
+  for (let i = 0; i < 3; i++) statuses.push((await post()).status);
+  for (let i = 0; i < 2; i++) statuses.push((await deleteAccount({ uid: 'u', ...google })).status);
+  statuses.push((await post()).status, (await deleteAccount({ uid: 'u', ...google })).status);
+  assert.deepEqual(statuses, [200, 200, 200, 200, 200, 429, 429]);
+});

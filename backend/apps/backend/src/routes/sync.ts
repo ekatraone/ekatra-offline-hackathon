@@ -323,48 +323,50 @@ export function createSyncRouter({ db, generator, firebase = getFirebaseAuth }: 
   // another phone): a Firebase ID token proves who they are. The learner is resolved exactly as the
   // exchange does, but only LOOKED UP, never created. Revocation is not checked, so a user in the
   // middle of deleting their Firebase account can still finish here.
-  router.delete(
-    '/auth/account',
-    rateLimit({
-      windowMs: 60 * 60_000,
-      max: 5,
-      standardHeaders: true,
-      legacyHeaders: false,
-      message: { success: false, error: 'Too many attempts. Please try again later.' },
-    }),
-    async (req: Request, res: Response) => {
-      try {
-        const auth = firebase();
-        if (!auth) {
-          res.status(503).json({ success: false, error: 'Account deletion is not available right now' });
-          return;
-        }
-        const idToken = req.body?.idToken;
-        if (typeof idToken !== 'string' || !idToken || idToken.length > 8192) {
-          res.status(400).json({ success: false, error: 'idToken is required' });
-          return;
-        }
-        let identity;
-        try {
-          identity = resolveFirebaseIdentity(await auth.verifyIdToken(idToken, false));
-        } catch {
-          identity = null;
-        }
-        if (!identity) {
-          res.status(401).json({ success: false, error: 'Invalid token' });
-          return;
-        }
-        const learner = identity.phone
-          ? await findLearnerByPhone(db, identity.phone)
-          : await findLearnerByFirebaseUid(db, identity.uid);
-        const deleted = learner ? await deleteLearnerAccount(db, learner.id, learner.organization_id) : false;
-        // `deleted` is repeated at the top level for clients that read it there.
-        res.json({ success: true, deleted, data: { deleted } });
-      } catch (err) {
-        fail(res, err, 'auth/account');
+  //
+  // Also served as POST /auth/account/delete: Android's HttpURLConnection refuses a body on DELETE
+  // on many versions. Both routes share one handler and one limiter (5/hour per IP in total).
+  const accountDeleteLimiter = rateLimit({
+    windowMs: 60 * 60_000,
+    max: 5,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, error: 'Too many attempts. Please try again later.' },
+  });
+  const deleteAccountByIdToken = async (req: Request, res: Response) => {
+    try {
+      const auth = firebase();
+      if (!auth) {
+        res.status(503).json({ success: false, error: 'Account deletion is not available right now' });
+        return;
       }
-    },
-  );
+      const idToken = req.body?.idToken;
+      if (typeof idToken !== 'string' || !idToken || idToken.length > 8192) {
+        res.status(400).json({ success: false, error: 'idToken is required' });
+        return;
+      }
+      let identity;
+      try {
+        identity = resolveFirebaseIdentity(await auth.verifyIdToken(idToken, false));
+      } catch {
+        identity = null;
+      }
+      if (!identity) {
+        res.status(401).json({ success: false, error: 'Invalid token' });
+        return;
+      }
+      const learner = identity.phone
+        ? await findLearnerByPhone(db, identity.phone)
+        : await findLearnerByFirebaseUid(db, identity.uid);
+      const deleted = learner ? await deleteLearnerAccount(db, learner.id, learner.organization_id) : false;
+      // `deleted` is repeated at the top level for clients that read it there.
+      res.json({ success: true, deleted, data: { deleted } });
+    } catch (err) {
+      fail(res, err, 'auth/account');
+    }
+  };
+  router.delete('/auth/account', accountDeleteLimiter, deleteAccountByIdToken);
+  router.post('/auth/account/delete', accountDeleteLimiter, deleteAccountByIdToken);
 
   router.use(learnerAuth(db));
 
