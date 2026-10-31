@@ -1,0 +1,13 @@
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 304c586..379ccc9 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -67,7 +67,7 @@
+     <!-- Lessons (Maya only; the consent screen and Lessons show these only when ActivePersona is Maya).
+          Server-side learner record: created by LearnerTokenProvider.exchange (POST /api/sync/auth/exchange),
+          filled by LearnerSyncManager (events, lesson requests) and erased by ServerAccountDeletion
+-         (DELETE /api/sync/me, or /api/sync/auth/account by ID token when no learner token exists) when the
++         (DELETE /api/sync/me, or POST /api/sync/auth/account/delete by ID token when no learner token exists) when the
+          account is deleted. The lesson topic is sent to Meta's model by the server (POST /api/sync/lessons/request).
+          Gated by lessons/LessonsConsent.kt. -->
+     <string name="privacy_collect_lessons">If you use Lessons: the topic you type is sent to Meta\'s AI to create the lesson. Your name, contact (phone or email) and lesson progress are stored on Ekatra\'s servers so they sync across your devices and WhatsApp. They are deleted when you delete your account, as soon as you\'re online if you\'re offline at the time.</string>

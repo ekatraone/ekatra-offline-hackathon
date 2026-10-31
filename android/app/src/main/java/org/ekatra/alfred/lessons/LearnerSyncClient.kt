@@ -214,7 +214,7 @@ class LearnerSyncClient internal constructor(
     override suspend fun deleteAccountByIdToken(idToken: String): DeleteOutcome = withContext(Dispatchers.IO) {
         if (config.baseUrl.isBlank()) return@withContext DeleteOutcome.NotConfigured
         try {
-            val raw = send("DELETE", "/api/sync/auth/account", READ_TIMEOUT_MS, mapOf("idToken" to idToken), authenticated = false)
+            val raw = send("POST", "/api/sync/auth/account/delete", READ_TIMEOUT_MS, mapOf("idToken" to idToken), authenticated = false)
             when {
                 raw.code in 200..299 -> DeleteOutcome.Deleted        // { deleted: true } or { deleted: false }: nothing left either way
                 raw.code == 401 -> DeleteOutcome.Unauthorized

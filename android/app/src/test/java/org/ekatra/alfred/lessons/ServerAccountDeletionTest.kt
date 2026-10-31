@@ -450,15 +450,26 @@ class ServerAccountDeletionTest {
     // ---- delete by ID token ----
 
     @Test
-    fun `deleteAccountByIdToken sends DELETE with the idToken in the body and no Authorization header`() = runBlocking {
+    fun `deleteAccountByIdToken sends a POST with the idToken in the body and no Authorization header`() = runBlocking {
         startServer()
 
         val outcome = client(activeToken = "active-jwt").deleteAccountByIdToken("firebase-id-token")
 
         assertEquals(DeleteOutcome.Deleted, outcome)
-        assertEquals("DELETE", lastMethod); assertEquals("/api/sync/auth/account", lastPath)
+        assertEquals("POST", lastMethod); assertEquals("/api/sync/auth/account/delete", lastPath)
         assertNull("the learner jwt must not ride along", lastAuth)
         assertTrue(lastBody!!.contains(""""idToken":"firebase-id-token""""))
+    }
+
+    @Test
+    fun `the ID-token erase is never a DELETE with a body, but the jwt erase stays a bodiless DELETE`() = runBlocking {
+        startServer()
+        client().deleteAccountByIdToken("t")
+        assertEquals("a POST, never a DELETE with a body", "POST", lastMethod)
+
+        client().deleteMe("jwt")
+        assertEquals("DELETE", lastMethod); assertEquals("/api/sync/me", lastPath)
+        assertEquals("no body on the jwt DELETE", "", lastBody)
     }
 
     @Test

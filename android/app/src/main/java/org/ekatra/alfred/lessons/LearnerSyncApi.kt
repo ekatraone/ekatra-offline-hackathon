@@ -23,7 +23,8 @@ interface LearnerSyncApi {
 
     /**
      * Erase the server-side learner of a Firebase user who has no learner jwt (they never opened Lessons on
-     * this phone). `DELETE /api/sync/auth/account` with `{ idToken }`; 200 returns `{ deleted: true|false }`,
+     * this phone). `POST /api/sync/auth/account/delete` with `{ idToken }` (a POST, because Android's HttpURLConnection
+     * can refuse a DELETE that has a body); 200 returns `{ deleted: true|false }`,
      * and both mean there is nothing left. Public: no Authorization header.
      */
     suspend fun deleteAccountByIdToken(idToken: String): DeleteOutcome

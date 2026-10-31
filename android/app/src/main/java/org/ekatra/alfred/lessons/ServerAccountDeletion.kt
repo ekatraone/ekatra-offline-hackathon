@@ -25,7 +25,7 @@ object NoLearnerAccountRemote : LearnerAccountRemote {
  *  - **Learner jwt** (`DELETE /api/sync/me`), when this phone exchanged one. The token is kept in a pending
  *    SET until the server answers 200 (erased) or 401 (no longer valid), so a second deletion can never drop
  *    the first one's token, and a retry always aims at that account's token, not at whoever signs in later.
- *  - **Firebase ID token** (`DELETE /api/sync/auth/account`), when there is no jwt but a Firebase user (they
+ *  - **Firebase ID token** (`POST /api/sync/auth/account/delete`, a POST because Android can refuse a DELETE with a body), when there is no jwt but a Firebase user (they
  *    never opened Lessons here). An ID token lasts an hour, so it is never stored: a retry fetches a fresh
  *    one, and only while that same user still exists. Once the user is gone it cannot be retried.
  *
