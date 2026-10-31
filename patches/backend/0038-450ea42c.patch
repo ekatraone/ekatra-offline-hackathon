@@ -1,0 +1,30 @@
+diff --git a/apps/backend/src/index.ts b/apps/backend/src/index.ts
+index c9e63788..9aa67551 100644
+--- a/apps/backend/src/index.ts
++++ b/apps/backend/src/index.ts
+@@ -60,7 +60,7 @@ import { usersRouter } from './routes/users.js';
+ import { fsmRouter } from './routes/fsm.js';
+ import { createDefaultSyncRouter } from './routes/sync.js';
+ import { createDefaultWhatsappAuthRouter } from './routes/authWhatsapp.js';
+-import { logProxyChainOnce } from './lib/proxyDiagnostics.js';
++import { logProxyChainOnce, trustProxyHops } from './lib/proxyDiagnostics.js';
+ import { authMiddleware } from './middleware/auth.js';
+ 
+ // Logger
+@@ -70,10 +70,12 @@ const app: express.Application = express();
+ const PORT = process.env.PORT || 3001;
+ 
+ // Middleware
+-// Behind Railway's proxy every request shares the proxy's address; trust one hop so the
+-// per-IP rate limiters (global and media) see the real client from X-Forwarded-For.
+-app.set('trust proxy', 1);
+-app.use(logProxyChainOnce()); // once: confirms the proxy chain is one hop (addresses truncated)
++// Behind the platform's proxies every request shares a proxy address; trust exactly as many hops
++// as there are (TRUST_PROXY_HOPS; 2 in production, 1 elsewhere) so the per-IP rate limiters see the
++// real client from X-Forwarded-For. Railway's public path crosses two proxies.
++const TRUST_PROXY_HOPS = trustProxyHops();
++app.set('trust proxy', TRUST_PROXY_HOPS);
++app.use(logProxyChainOnce(undefined, TRUST_PROXY_HOPS)); // once per boot: confirms the chain (addresses truncated)
+ app.use(helmet());
+ app.use(cors({
+   origin: process.env.FRONTEND_URL || 'http://localhost:3000',

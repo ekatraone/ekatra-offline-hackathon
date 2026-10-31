@@ -86,9 +86,10 @@ test('media limiter keys on the real client behind a trusted proxy (X-Forwarded-
   }
 });
 
-test('index.ts trusts one proxy hop so per-IP limiters see real clients', () => {
+test('index.ts sets trust proxy from TRUST_PROXY_HOPS so per-IP limiters see real clients', () => {
   const source = readFileSync(fileURLToPath(new URL('../../index.ts', import.meta.url)), 'utf-8');
-  assert.match(source, /app\.set\('trust proxy', 1\);/);
+  assert.match(source, /app\.set\('trust proxy', TRUST_PROXY_HOPS\);/);
+  assert.match(source, /const TRUST_PROXY_HOPS = trustProxyHops\(\);/);
 });
 
 test('media: the rest of the sync API still requires auth', async () => {
