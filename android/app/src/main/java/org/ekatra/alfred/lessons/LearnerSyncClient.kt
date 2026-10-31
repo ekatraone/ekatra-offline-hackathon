@@ -15,7 +15,14 @@ import javax.inject.Singleton
  * `Authorization: Bearer <learner JWT>` and unwraps the `{success, data | error}` envelope.
  */
 @Singleton
-class LearnerSyncClient @Inject constructor(private val config: SyncConfig) : LearnerSyncApi {
+class LearnerSyncClient internal constructor(
+    private val config: SyncConfig,
+    // Seam for unit tests: the Firebase Performance plugin rewrites URL.openConnection() in app
+    // classes at build time, which cannot run on the JVM. Tests pass their own factory.
+    private val openConnection: (URL) -> HttpURLConnection
+) : LearnerSyncApi {
+
+    @Inject constructor(config: SyncConfig) : this(config, ::defaultOpen)
 
     companion object {
         const val CONNECT_TIMEOUT_MS = 5_000
@@ -52,7 +59,7 @@ class LearnerSyncClient @Inject constructor(private val config: SyncConfig) : Le
         if (!config.isConfigured) return@withContext ApiResult.Rejected(0, "Sync is not configured")
         var conn: HttpURLConnection? = null
         try {
-            conn = (URL(config.baseUrl.trimEnd('/') + path).openConnection() as HttpURLConnection).apply {
+            conn = openConnection(URL(config.baseUrl.trimEnd('/') + path)).apply {
                 requestMethod = method
                 connectTimeout = CONNECT_TIMEOUT_MS
                 readTimeout = readTimeoutMs
@@ -96,3 +103,5 @@ class LearnerSyncClient @Inject constructor(private val config: SyncConfig) : Le
         }
     }
 }
+
+private fun defaultOpen(url: URL): HttpURLConnection = url.openConnection() as HttpURLConnection

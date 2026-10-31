@@ -1,0 +1,114 @@
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index e1d680f..c372fc1 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -11,6 +11,7 @@ plugins {
+ }
+ 
+ import com.android.build.api.dsl.ApkSigningConfig
++import java.util.Properties
+ import java.time.Instant
+ import java.time.format.DateTimeFormatter
+ 
+@@ -64,6 +65,14 @@ fun configurePersonaSigning(
+     }
+ }
+ 
++// Lessons sync endpoint and demo learner token. Debug builds read them from the gitignored
++// local.properties; release builds always get "", so no token can ship in a release APK.
++val localProps = Properties().apply {
++    val f = rootProject.file("local.properties")
++    if (f.exists()) f.inputStream().use { load(it) }
++}
++fun quoted(value: String?) = "\"" + (value ?: "").trim().replace("\\", "\\\\").replace("\"", "\\\"") + "\""
++
+ ksp {
+     arg("room.schemaLocation", "$projectDir/schemas")
+ }
+@@ -143,6 +152,8 @@ android {
+ 
+     buildTypes {
+         release {
++            buildConfigField("String", "SYNC_BASE_URL", "\"\"")
++            buildConfigField("String", "DEMO_LEARNER_TOKEN", "\"\"")
+             isMinifyEnabled = true
+             isShrinkResources = true
+             // No signingConfig here — each persona flavor supplies its own release
+@@ -153,6 +164,8 @@ android {
+             )
+         }
+         debug {
++            buildConfigField("String", "SYNC_BASE_URL", quoted(localProps.getProperty("SYNC_BASE_URL")))
++            buildConfigField("String", "DEMO_LEARNER_TOKEN", quoted(localProps.getProperty("DEMO_LEARNER_TOKEN")))
+             isMinifyEnabled = false
+             // Force the standard auto-generated debug keystore regardless of flavor,
+             // since each flavor's Firebase project has that debug cert's SHA-1 registered.
+diff --git a/app/src/main/java/org/ekatra/alfred/data/sync/SyncWorker.kt b/app/src/main/java/org/ekatra/alfred/data/sync/SyncWorker.kt
+index d952596..27b28b2 100644
+--- a/app/src/main/java/org/ekatra/alfred/data/sync/SyncWorker.kt
++++ b/app/src/main/java/org/ekatra/alfred/data/sync/SyncWorker.kt
+@@ -6,6 +6,8 @@ import androidx.hilt.work.HiltWorker
+ import androidx.work.*
+ import dagger.assisted.Assisted
+ import dagger.assisted.AssistedInject
++import org.ekatra.alfred.lessons.LearnerSyncManager
++import org.ekatra.alfred.lessons.SyncStatus
+ import java.util.concurrent.TimeUnit
+ 
+ /**
+@@ -16,12 +18,27 @@ import java.util.concurrent.TimeUnit
+ class SyncWorker @AssistedInject constructor(
+     @Assisted context: Context,
+     @Assisted workerParams: WorkerParameters,
+-    private val syncManager: SyncManager
++    private val syncManager: SyncManager,
++    private val learnerSyncManager: LearnerSyncManager
+ ) : CoroutineWorker(context, workerParams) {
+ 
+     companion object {
+         private const val TAG = "SyncWorker"
+         const val WORK_NAME = "ekatra_sync"
++        const val LEARNER_WORK_NAME = "learner_sync"
++
++        /**
++         * Queue a learner sync (lesson requests + quiz events) to run once there is a network.
++         * KEEP: if one is already queued or running, it will pick up the new rows.
++         */
++        fun enqueueLearnerSync(context: Context) {
++            val request = OneTimeWorkRequestBuilder<SyncWorker>()
++                .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
++                .build()
++            WorkManager.getInstance(context).enqueueUniqueWork(
++                LEARNER_WORK_NAME, ExistingWorkPolicy.KEEP, request
++            )
++        }
+ 
+         /**
+          * Schedule periodic sync (every 6 hours when connected + battery not low).
+@@ -63,12 +80,22 @@ class SyncWorker @AssistedInject constructor(
+     }
+ 
+     override suspend fun doWork(): Result {
+-        return try {
++        // Independent: a failure in analytics sync must not stop learner data, or the reverse.
++        var retry = false
++        try {
+             syncManager.syncPending()
+-            Result.success()
+         } catch (e: Exception) {
+-            Log.e(TAG, "Sync worker failed", e)
+-            Result.retry()
++            Log.e(TAG, "Analytics sync failed", e)
++            retry = true
++        }
++        try {
++            val report = learnerSyncManager.sync()
++            // 401 will not fix itself on retry; every other failure is worth another attempt.
++            if (report.status == SyncStatus.ERROR) retry = true
++        } catch (e: Exception) {
++            Log.e(TAG, "Learner sync failed", e)
++            retry = true
+         }
++        return if (retry) Result.retry() else Result.success()
+     }
+ }
