@@ -7,7 +7,6 @@
  *   npx tsx src/scripts/issueDemoLearner.ts --phone +910000000042 [--name "Demo"]
  */
 
-import jwt from 'jsonwebtoken';
 import { assertSafeDatabase } from './safeDb.js';
 
 assertSafeDatabase();
@@ -31,32 +30,19 @@ if (!secret) {
 
 const { initializeDatabase, db } = await import('@ekatra/database');
 initializeDatabase({ connectionString: process.env.DATABASE_URL });
+const { findOrCreateLearnerByPhone, signLearnerToken, defaultOrganizationId } = await import('../services/learnerIdentity.js');
 
-let org = await db.organizations.getDefault();
-if (!org) {
-  const created = await db.raw(
-    `INSERT INTO organizations (name, slug) VALUES ('Ekatra Demo', 'ekatra-demo') RETURNING *`,
-  );
-  org = created.rows[0];
+if (!(await defaultOrganizationId(db))) {
+  await db.raw(`INSERT INTO organizations (name, slug) VALUES ('Ekatra Demo', 'ekatra-demo')`);
 }
 
-const existing = await db.raw(`SELECT * FROM learners WHERE phone = $1 AND organization_id = $2`, [phone, org.id]);
-let learner = existing.rows[0];
-if (!learner) {
-  const created = await db.raw(
-    `INSERT INTO learners (organization_id, phone, name, language, timezone)
-     VALUES ($1, $2, $3, 'en', 'Asia/Kolkata') RETURNING *`,
-    [org.id, phone, name],
-  );
-  learner = created.rows[0];
+const result = await findOrCreateLearnerByPhone(db, { phone, name });
+if (!result) {
+  console.error('Could not find or create the learner');
+  process.exit(1);
 }
+const { learner, created } = result;
 
-const token = jwt.sign(
-  { learnerId: learner.id, phone: learner.phone, role: 'learner', organizationId: org.id },
-  secret,
-  { algorithm: 'HS256', expiresIn: '30d' },
-);
-
-console.log(JSON.stringify({ learnerId: learner.id, organizationId: org.id, phone: learner.phone, created: !existing.rows[0] }));
-console.log(`TOKEN=${token}`);
+console.log(JSON.stringify({ learnerId: learner.id, organizationId: learner.organization_id, phone: learner.phone, created }));
+console.log(`TOKEN=${signLearnerToken(learner, secret)}`);
 process.exit(0);
