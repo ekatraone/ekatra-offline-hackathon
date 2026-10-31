@@ -295,6 +295,24 @@ export async function buildBundle(
       ).rows
     : [];
 
+  const lessons = shapeLessons(lessonRows, questionRows, absolute);
+  const settings = course.settings ?? {};
+  return {
+    version: bundleVersion(course.title, settings, lessons, lessonRows),
+    course: {
+      id: course.id,
+      title: course.title,
+      description: course.description ?? '',
+      language: settings.language ?? 'en',
+      generator: settings.generator ?? null,
+      coverImageUrl: absolute(settings.coverImageUrl),
+    },
+    lessons,
+  };
+}
+
+/** Lesson and question rows → bundle lessons. Shared by the bundle and by the /me version batch. */
+function shapeLessons(lessonRows: any[], questionRows: any[], absolute: (stored: unknown) => string | null): BundleLesson[] {
   const byLesson = new Map<string, BundleQuestion[]>();
   for (const q of questionRows) {
     const list = byLesson.get(q.lesson_id) ?? [];
@@ -307,8 +325,7 @@ export async function buildBundle(
     });
     byLesson.set(q.lesson_id, list);
   }
-
-  const lessons: BundleLesson[] = lessonRows.map((l: any) => ({
+  return lessonRows.map((l: any) => ({
     id: l.id,
     kind: l.content_type === 'review' ? 'review' : 'module',
     title: l.title,
@@ -319,27 +336,55 @@ export async function buildBundle(
     imageUrl: l.content_type === 'review' ? null : absolute(l.media_url),
     questions: byLesson.get(l.id) ?? [],
   }));
+}
 
-  const settings = course.settings ?? {};
-  // The version covers the image ids (not the base URL), so it changes when late images attach.
+/**
+ * The bundle version. It covers the content and the image ids (not the base URL), so it changes
+ * when late images attach. The single definition, used by both the bundle and /me.
+ */
+function bundleVersion(title: string, settings: any, lessons: BundleLesson[], lessonRows: any[]): string {
   const imageIds = {
-    cover: mediaIdFromPath(settings.coverImageUrl),
+    cover: mediaIdFromPath(settings?.coverImageUrl),
     lessons: lessonRows.map((l: any) => (l.content_type === 'review' ? null : mediaIdFromPath(l.media_url))),
   };
-  return {
-    version: createHash('sha1')
-      .update(JSON.stringify({ t: course.title, lessons: lessons.map((l) => ({ ...l, imageUrl: undefined })), imageIds }))
-      .digest('hex'),
-    course: {
-      id: course.id,
-      title: course.title,
-      description: course.description ?? '',
-      language: settings.language ?? 'en',
-      generator: settings.generator ?? null,
-      coverImageUrl: absolute(settings.coverImageUrl),
-    },
-    lessons,
-  };
+  return createHash('sha1')
+    .update(JSON.stringify({ t: title, lessons: lessons.map((l) => ({ ...l, imageUrl: undefined })), imageIds }))
+    .digest('hex');
+}
+
+/** Bundle versions for several courses in two queries total, whatever the number of enrollments. */
+async function bundleVersions(db: SyncDb, courses: { id: string; title: string; settings: any }[]): Promise<Map<string, string>> {
+  const versions = new Map<string, string>();
+  if (!courses.length) return versions;
+
+  const lessonRows = (
+    await db.raw(
+      `SELECT id, course_id, title, content, content_type, sequence_order, day_number, media_url
+       FROM lessons WHERE course_id = ANY($1::uuid[]) ORDER BY course_id, sequence_order ASC`,
+      [courses.map((c) => c.id)],
+    )
+  ).rows;
+  const questionRows = lessonRows.length
+    ? (
+        await db.raw(
+          `SELECT id, lesson_id, question, options, correct_answer, explanation
+           FROM quiz_questions WHERE lesson_id = ANY($1::uuid[])
+           ORDER BY sequence_order ASC, created_at ASC`,
+          [lessonRows.map((l: any) => l.id)],
+        )
+      ).rows
+    : [];
+
+  const lessonsByCourse = new Map<string, any[]>();
+  for (const l of lessonRows) lessonsByCourse.set(l.course_id, [...(lessonsByCourse.get(l.course_id) ?? []), l]);
+  const none = () => null;
+  for (const c of courses) {
+    const rows = lessonsByCourse.get(c.id) ?? [];
+    const ids = new Set(rows.map((l: any) => l.id));
+    const shaped = shapeLessons(rows, questionRows.filter((q: any) => ids.has(q.lesson_id)), none);
+    versions.set(c.id, bundleVersion(c.title, c.settings ?? {}, shaped, rows));
+  }
+  return versions;
 }
 
 // ── Events ─────────────────────────────────────────────────────────────────
@@ -581,6 +626,7 @@ export async function getMe(db: SyncDb, learner: SyncLearner) {
   ).rows;
 
   const profile = await refreshProfile(db, learner.id);
+  const versions = await bundleVersions(db, courseRows);
 
   const lessonKeys = [...new Set([...Object.keys(profile.mastery), ...profile.struggles])].filter(isUuid);
   const titleRows = lessonKeys.length
@@ -594,18 +640,16 @@ export async function getMe(db: SyncDb, learner: SyncLearner) {
       phone: learnerRow.phone,
       language: learnerRow.language ?? 'en',
     },
-    courses: await Promise.all(
-      courseRows.map(async (c: any) => ({
-        courseId: c.id,
-        title: c.title,
-        language: c.settings?.language ?? 'en',
-        status: c.status === 'completed' ? 'completed' : (c.progress ?? 0) > 0 ? 'in_progress' : 'enrolled',
-        progress: c.progress ?? 0,
-        generator: c.settings?.generator ?? null,
-        // The phone refetches a stored bundle when this differs from the one it holds.
-        bundleVersion: await buildBundle(db, learner, c.id).then((b) => b.version, () => null),
-      })),
-    ),
+    courses: courseRows.map((c: any) => ({
+      courseId: c.id,
+      title: c.title,
+      language: c.settings?.language ?? 'en',
+      status: c.status === 'completed' ? 'completed' : (c.progress ?? 0) > 0 ? 'in_progress' : 'enrolled',
+      progress: c.progress ?? 0,
+      generator: c.settings?.generator ?? null,
+      // The phone refetches a stored bundle when this differs from the one it holds.
+      bundleVersion: versions.get(c.id) ?? null,
+    })),
     profile,
     lessonTitles: Object.fromEntries(titleRows.map((r: any) => [r.id, r.title])),
   };

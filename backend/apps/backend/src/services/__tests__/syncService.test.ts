@@ -31,7 +31,7 @@ const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0
 
 interface Req { status: string; course_id: string | null; updatedAt: number; attempt: number }
 
-function makeDb(opts: { authored?: boolean; enrolled?: boolean; otherOrg?: boolean } = {}) {
+function makeDb(opts: { authored?: boolean; enrolled?: boolean; otherOrg?: boolean; extraCourses?: number } = {}) {
   const enrolled = opts.enrolled ?? true;
   const requests = new Map<string, Req>();
   const seenEvents = new Set<string>();
@@ -58,12 +58,15 @@ function makeDb(opts: { authored?: boolean; enrolled?: boolean; otherOrg?: boole
     { id: Q2, lesson_id: LESSON2, question: 'q2', options: ['a', 'b', 'c', 'd'], correct_answer: 'C', explanation: 'e2' },
   ];
 
+  let queryCount = 0;
   const db = {
     calls,
+    get queryCount() { return queryCount; },
     requests,
     stored,
     advance(ms: number) { clock += ms; },
     async raw(sql: string, p: any[] = []) {
+      queryCount++;
       const has = (s: string) => sql.includes(s);
       if (has('INSERT INTO sync_lesson_requests')) {
         const key = `${p[0]}|${p[1]}`;
@@ -105,7 +108,12 @@ function makeDb(opts: { authored?: boolean; enrolled?: boolean; otherOrg?: boole
       if (has('INSERT INTO enrollments')) { calls.enrollInserts++; return { rows: [] }; }
       if (has('SELECT id, name, phone, language')) return { rows: [{ id: LEARNER.id, name: 'Demo', phone: '+910000000042', language: 'en' }] };
       if (has('c.settings, e.status, e.progress')) {
-        return { rows: enrolled ? [{ id: COURSE, title: course.title, settings: course.settings, status: 'enrolled', progress: 0 }] : [] };
+        const extras = Array.from({ length: opts.extraCourses ?? 0 }, (_, i) => ({
+          id: uuid(5000 + i), title: `Extra ${i}`, settings: { language: 'en' }, status: 'enrolled', progress: 0 }));
+        return { rows: enrolled ? [{ id: COURSE, title: course.title, settings: course.settings, status: 'enrolled', progress: 0 }, ...extras] : [] };
+      }
+      if (has('FROM lessons WHERE course_id = ANY')) {
+        return { rows: lessons.filter((l) => p[0].includes(l.course_id)) };
       }
       if (has('SELECT id, title FROM lessons WHERE id = ANY')) return { rows: [] };
       if (has('FROM enrollments e JOIN courses c')) {
@@ -497,4 +505,21 @@ test('/me: every course entry carries the bundleVersion of its bundle', async ()
   assert.equal(me.courses.length, 1);
   assert.equal(me.courses[0].bundleVersion, bundle.version);
   assert.match(me.courses[0].bundleVersion as string, /^[0-9a-f]{40}$/);
+});
+
+test('/me: the batched bundleVersion is identical to the bundle version, for every course', async () => {
+  const db = makeDb({ extraCourses: 2 });
+  const me = await getMe(db, LEARNER);
+  const bundle = await buildBundle(db, LEARNER, COURSE, 'https://any.example');
+  assert.equal(me.courses[0].bundleVersion, bundle.version);
+  // courses without lessons still get a stable, distinct version
+  assert.equal(me.courses.length, 3);
+  assert.ok(me.courses.slice(1).every((c) => /^[0-9a-f]{40}$/.test(c.bundleVersion as string)));
+  assert.notEqual(me.courses[1].bundleVersion, me.courses[2].bundleVersion);
+});
+
+test('/me: the number of queries does not grow with the number of enrollments', async () => {
+  const one = makeDb(); await getMe(one, LEARNER);
+  const many = makeDb({ extraCourses: 25 }); await getMe(many, LEARNER);
+  assert.equal(many.queryCount, one.queryCount);
 });
