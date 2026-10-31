@@ -62,6 +62,14 @@ class LessonProgressStore(private val file: File) {
         update { it.copy(profile = profile) }
     }
 
+    /** Forget all answers, completions and the cached server profile (account deletion). */
+    @Synchronized
+    fun clear() {
+        file.delete()
+        File(file.parentFile, file.name + ".tmp").delete()
+        _state.value = ProgressData()
+    }
+
     private fun update(change: (ProgressData) -> ProgressData) {
         val next = change(_state.value)
         file.parentFile?.mkdirs()

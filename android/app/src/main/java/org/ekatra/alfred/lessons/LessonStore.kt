@@ -38,6 +38,13 @@ class LessonStore(private val dir: File) {
         _bundles.value = readAll()
     }
 
+    /** Remove every stored bundle (account deletion). */
+    @Synchronized
+    fun clear() {
+        dir.listFiles()?.forEach { it.delete() }
+        _bundles.value = emptyList()
+    }
+
     /** Newest first. Unreadable files are skipped, not fatal. */
     private fun readAll(): List<LessonBundle> =
         (dir.listFiles { f -> f.isFile && f.name.endsWith(".json") } ?: emptyArray())
