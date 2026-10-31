@@ -251,3 +251,21 @@ test('TwilioProvider.sendImage sends MediaUrl, with the caption as Body', async 
   assert.equal(sent[1].get('Body'), 'Ready!');
   assert.equal(sent[1].get('MediaUrl'), 'https://demo.example/api/sync/media/abc');
 });
+
+test('TwilioProvider.sendDocument sends the PDF as MediaUrl, not as a link in the text', async () => {
+  const { initializeMessaging, messaging } = await import('@ekatra/messaging');
+  initializeMessaging({ provider: 'twilio', twilioAccountSid: 'ACtest', twilioAuthToken: 't', twilioFromNumber: '+15550001111' } as any);
+  const sent: URLSearchParams[] = [];
+  globalThis.fetch = (async (_u: any, init: any) => {
+    sent.push(new URLSearchParams(init.body));
+    return new Response(JSON.stringify({ sid: 'SM1' }), { status: 201 });
+  }) as any;
+
+  await messaging.sendDocument('+919876543210', {
+    documentUrl: 'https://demo.example/api/certificates/abc',
+    filename: 'Ekatra_Certificate.pdf',
+    caption: 'Your certificate',
+  });
+  assert.equal(sent[0].get('MediaUrl'), 'https://demo.example/api/certificates/abc');
+  assert.equal(sent[0].get('Body'), 'Your certificate');
+});

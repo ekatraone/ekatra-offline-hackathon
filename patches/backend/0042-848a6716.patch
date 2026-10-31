@@ -1,0 +1,67 @@
+diff --git a/packages/delivery/src/services/courseDelivery.ts b/packages/delivery/src/services/courseDelivery.ts
+index e53c333c..5f08563c 100644
+--- a/packages/delivery/src/services/courseDelivery.ts
++++ b/packages/delivery/src/services/courseDelivery.ts
+@@ -384,24 +384,22 @@ export class CourseDeliveryService {
+         const TEMPLATES = await getTemplates();
+         const nameStr = firstName ? `, ${firstName}` : '';
+ 
+-        // Use pre-approved course_complete template — delivers even outside session window
+-        const templateResult = await messaging.sendTemplate(
+-          learner.phone,
+-          TEMPLATES.course_complete,
+-        );
+-
+-        if (!templateResult.success) {
+-          await checkedSend(messaging.sendText(learner.phone, {
+-            text: `🎉🎊 *Congratulations${nameStr}!*\n\nYou've completed the entire course! That's a big achievement! 🏆`,
+-          }));
++        // Completion always happens inside the learner's session, so this is plain text with the real
++        // name and course. (The old course_complete template was sent with no variables and showed its
++        // defaults, "Student" and "Mindset Mastery", plus Browse Courses / Get Certificate buttons.)
++        let courseTitle = 'your course';
++        try {
++          courseTitle = (await db.courses.findById(enrollment.course_id))?.title || 'your course';
++        } catch (titleErr) {
++          logger.error('Course title lookup failed (non-fatal):', titleErr);
+         }
++        await checkedSend(messaging.sendText(learner.phone, {
++          text: `🎉🎊 *Congratulations${nameStr}!*\n\nYou completed *${courseTitle}*! That's a big achievement! 🏆`,
++        }));
+ 
+         // Issue certificate — generate PDF, send as document
+-        let courseTitle = 'your course';
+         try {
+           const freshLearner = await db.learners.findById(learner.id);
+-          const courseForCert = await db.courses.findById(enrollment.course_id);
+-          courseTitle = courseForCert?.title || 'Course';
+           const { url, fromCache } = await issueCertificate(freshLearner, courseTitle);
+           await delay(3000);
+           await checkedSend(messaging.sendDocument(learner.phone, {
+@@ -415,9 +413,9 @@ export class CourseDeliveryService {
+           logger.error('Certificate generation failed:', certErr);
+         }
+ 
+-        // Send course_feedback template
++        // course_feedback is a WhatsApp Flow; senders without it show nothing, so it can be turned off.
+         try {
+-          await messaging.sendTemplate(
++          if (process.env.DISABLE_FEEDBACK_FLOW !== '1') await messaging.sendTemplate(
+             learner.phone,
+             TEMPLATES.course_feedback,
+             { '1': courseTitle },
+diff --git a/packages/messaging/src/index.ts b/packages/messaging/src/index.ts
+index 74e119b9..364a2731 100644
+--- a/packages/messaging/src/index.ts
++++ b/packages/messaging/src/index.ts
+@@ -590,8 +590,8 @@ class TwilioProvider {
+   }
+ 
+   async sendDocument(to: string, message: DocumentMessage): Promise<SendResult> {
+-    const body = message.caption ? `${message.caption}\n${message.documentUrl}` : message.documentUrl;
+-    return this.send(to, body);
++    // Sent as a real attachment (MediaUrl), not a link in the text body.
++    return this.send(to, message.caption || '', message.documentUrl);
+   }
+ 
+   /**
