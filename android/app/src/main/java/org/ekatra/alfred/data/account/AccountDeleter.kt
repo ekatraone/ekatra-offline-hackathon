@@ -1,20 +1,26 @@
 package org.ekatra.alfred.data.account
 
+import org.ekatra.alfred.lessons.LearnerAccountRemote
+import org.ekatra.alfred.lessons.NoLearnerAccountRemote
 import javax.inject.Inject
 
 /**
  * Runs the account deletion sequence (milestone 2, criteria 1, 2 and 4).
  *
  * Remote data is removed before the Firebase Auth user, so a failure part-way leaves the
- * account intact and retryable. Local data is cleared last, after the Auth user is gone.
+ * account intact and retryable. The learner record on the Ekatra server goes just before the Auth
+ * user. Local data is cleared last, after the Auth user is gone.
  *
  * FCM tokens are not written to Firestore (see EkatraMessagingService), so there is nothing
  * to delete for them and no step covers them. Feedback is anonymous and is not deleted here.
  */
 class AccountDeleter @Inject constructor(
     private val remote: AccountRemote,
-    private val local: LocalAccountData
+    private val local: LocalAccountData,
+    private val learner: LearnerAccountRemote
 ) {
+    /** For callers with no lessons server to erase from. */
+    constructor(remote: AccountRemote, local: LocalAccountData) : this(remote, local, NoLearnerAccountRemote)
 
     suspend fun delete(uid: String, reauthenticate: suspend () -> Boolean): DeletionResult {
         try {
@@ -27,6 +33,10 @@ class AccountDeleter @Inject constructor(
         } catch (e: Exception) {
             return DeletionResult.Failed(Step.PROFILE, e)
         }
+
+        // The learner record on the Ekatra server goes before the Firebase user does, while the learner token
+        // can still be had. It never fails the deletion: if it cannot be sent it is recorded and retried.
+        learner.eraseLearner()
 
         try {
             remote.deleteAuthUser()

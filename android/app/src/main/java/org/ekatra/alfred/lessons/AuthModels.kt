@@ -37,3 +37,14 @@ sealed interface VerifyOutcome {
 data class ExchangeResponse(val token: String? = null, val learner: MeLearner? = null)
 data class StartResponse(val resendAfterSeconds: Int? = null, val expiresInSeconds: Int? = null)
 data class VerifyResponse(val firebaseCustomToken: String? = null)
+
+/** `DELETE /api/sync/me`: erase the learner, their progress and events on the server. */
+sealed interface DeleteOutcome {
+    /** 200: erased. */
+    data object Deleted : DeleteOutcome
+    /** 401: the token is no longer valid, so there is nothing this token can still erase or reach. */
+    data object Unauthorized : DeleteOutcome
+    /** Network error, 5xx or anything else: try again later. */
+    data class Failed(val message: String) : DeleteOutcome
+    data object NotConfigured : DeleteOutcome
+}

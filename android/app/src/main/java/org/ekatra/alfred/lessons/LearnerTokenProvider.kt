@@ -23,6 +23,8 @@ interface TokenRefresher {
 sealed interface ExchangeResult {
     data object Done : ExchangeResult
     data object NoFirebaseUser : ExchangeResult
+    /** The Lessons notice has not been accepted, so nothing is sent. */
+    data object ConsentNeeded : ExchangeResult
     data object Offline : ExchangeResult
     /** Firebase no longer vouches for this user. */
     data object Unauthorized : ExchangeResult
@@ -41,7 +43,8 @@ class LearnerTokenProvider @Inject constructor(
     private val firebase: FirebaseSession,
     private val config: SyncConfig,
     private val connectivity: Connectivity,
-    private val localData: LocalLearnerData
+    private val localData: LocalLearnerData,
+    private val consent: LessonsConsent
 ) : TokenRefresher {
 
     companion object {
@@ -58,6 +61,8 @@ class LearnerTokenProvider @Inject constructor(
     }
 
     override suspend fun ensureToken(): Boolean {
+        // No exchange (and so no server learner record) before the Lessons notice is accepted.
+        if (!consent.isAccepted()) return config.isConfigured
         val stored = if (config.hasStoredToken) config.token else null
         if (stored != null && !isNearExpiry(stored)) return config.isConfigured
         // Offline, or nobody signed in: keep whatever we have (a near-expiry JWT still works until it expires).
@@ -68,6 +73,7 @@ class LearnerTokenProvider @Inject constructor(
 
     /** Exchange the current Firebase user for a learner JWT and store it. Call after any Firebase sign-in. */
     suspend fun exchange(): ExchangeResult = lock.withLock {
+        if (!consent.isAccepted()) return ExchangeResult.ConsentNeeded
         if (!firebase.hasUser()) return ExchangeResult.NoFirebaseUser
         if (!connectivity.isOnline()) return ExchangeResult.Offline
 
@@ -87,7 +93,7 @@ class LearnerTokenProvider @Inject constructor(
     }
 
     override suspend fun refreshAfter401(): Boolean = lock.withLock {
-        if (!firebase.hasUser() || !connectivity.isOnline()) return false
+        if (!consent.isAccepted() || !firebase.hasUser() || !connectivity.isOnline()) return false
         // The token the server refused is no use, and the cached ID token may be stale too: force a new one.
         val idToken = firebase.idToken(forceRefresh = true) ?: return false
         val outcome = api.exchange(idToken)

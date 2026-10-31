@@ -52,6 +52,9 @@ class FakeApi : LearnerSyncApi {
     }
     var meResult: () -> ApiResult<MeResponse> = { ApiResult.Ok(MeResponse()) }
 
+    var deleteResult: (String) -> DeleteOutcome = { DeleteOutcome.Deleted }
+    val deleteCalls = mutableListOf<String>()
+
     var exchangeResult: (String) -> ExchangeOutcome = { ExchangeOutcome.Success("exchanged-jwt", "learner-1", "Asha", "+919876543210", null) }
     val exchangeCalls = mutableListOf<String>()
 
@@ -75,6 +78,10 @@ class FakeApi : LearnerSyncApi {
         return eventsResult(events)
     }
     override suspend fun getMe(): ApiResult<MeResponse> { meCalls++; return meResult() }
+    override suspend fun deleteMe(token: String): DeleteOutcome {
+        deleteCalls += token
+        return deleteResult(token)
+    }
     override suspend fun exchange(idToken: String): ExchangeOutcome {
         exchangeCalls += idToken
         return exchangeResult(idToken)
@@ -152,7 +159,10 @@ fun sampleBundleWithImages(courseId: String = "course-1", lessonId: String = "le
     )
 }
 
-class FakeTokenStore(var token: String? = null, var learner: String? = null) : TokenStore {
+class FakeTokenStore(var token: String? = null, var learner: String? = null, var pendingDelete: String? = null) : TokenStore {
+    override fun pendingDeleteToken() = pendingDelete
+    override fun setPendingDeleteToken(token: String) { pendingDelete = token }
+    override fun clearPendingDelete() { pendingDelete = null }
     override fun token() = token
     override fun learnerId() = learner
     override fun save(token: String, learnerId: String?) { this.token = token; if (learnerId != null) learner = learnerId }
@@ -240,3 +250,21 @@ fun fakeJwt(expSeconds: Long?): String {
     val payload = if (expSeconds == null) """{"sub":"x"}""" else """{"sub":"x","exp":$expSeconds}"""
     return b64("""{"alg":"HS256","typ":"JWT"}""") + "." + b64(payload) + ".sig"
 }
+
+class FakeConsentStore(var acceptedAt: Int = 0, var declinedAt: Int = 0) : LessonsConsentStore {
+    override fun acceptedVersion() = acceptedAt
+    override fun declinedVersion() = declinedAt
+    override fun setAccepted(version: Int) { acceptedAt = version; declinedAt = 0 }
+    override fun setDeclined(version: Int) { declinedAt = version }
+    override fun clear() { acceptedAt = 0; declinedAt = 0 }
+}
+
+/** Lessons consent that has been accepted at the current wording: what almost every test wants. */
+fun acceptedConsent() = LessonsConsent(FakeConsentStore(acceptedAt = LessonsConsent.CURRENT_VERSION))
+
+/** Builds the manager the way Hilt does, with a refresher that has nothing to exchange unless a test says so. */
+fun testManager(
+    api: LearnerSyncApi, queue: org.ekatra.alfred.data.local.SyncQueueDao, bundles: LessonStore, progress: LessonProgressStore,
+    config: SyncConfig, connectivity: Connectivity, refresher: TokenRefresher = FakeRefresher(),
+    consent: LessonsConsent = acceptedConsent()
+) = LearnerSyncManager(api, queue, bundles, progress, config, connectivity, refresher, LocalLearnerData(queue, bundles, progress), consent)

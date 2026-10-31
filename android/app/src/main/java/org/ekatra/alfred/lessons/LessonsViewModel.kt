@@ -83,6 +83,8 @@ data class LessonsUiState(
     /** A server is known but there is no token yet. */
     val needsToken: Boolean = false,
     val signIn: LessonsSignIn = LessonsSignIn.UNAVAILABLE,
+    /** Whether the Lessons storage notice has been accepted; until it has, nothing leaves the phone. */
+    val consent: ConsentState = ConsentState.ACCEPTED,
     val signInMessage: String? = null,
     val online: Boolean = true,
     val bundles: List<LessonBundle> = emptyList(),
@@ -119,7 +121,8 @@ class LessonsViewModel @Inject constructor(
     private val trigger: SyncTrigger,
     @Named("inference") private val inferenceMutex: Mutex,
     private val persona: Persona,
-    private val firebase: FirebaseSession
+    private val firebase: FirebaseSession,
+    private val consent: LessonsConsent
 ) : ViewModel() {
 
     companion object {
@@ -139,7 +142,7 @@ class LessonsViewModel @Inject constructor(
     }
 
     private val formatter = PromptFormatter()
-    private val _ui = MutableStateFlow(LessonsUiState(configured = manager.isConfigured, needsToken = manager.needsToken))
+    private val _ui = MutableStateFlow(LessonsUiState(configured = manager.isConfigured, needsToken = manager.needsToken, consent = consent.state.value))
     val uiState: StateFlow<LessonsUiState> = _ui.asStateFlow()
 
     /** Test seams. */
@@ -179,6 +182,18 @@ class LessonsViewModel @Inject constructor(
         viewModelScope.launch { manager.status.collect { s -> _ui.update { it.copy(syncStatus = s) } } }
         // The token can change under us: a join, a sign-out, or a 401 clearing an expired one.
         viewModelScope.launch { manager.configChanges.collect { refreshConfig() } }
+        viewModelScope.launch {
+            var before = consent.state.value
+            consent.state.collect { now ->
+                _ui.update { it.copy(consent = now) }
+                // Accepting the notice is what lets the token exchange and the first sync happen.
+                if (now == ConsentState.ACCEPTED && before != ConsentState.ACCEPTED) {
+                    setUpToken()
+                    if (manager.isConfigured) syncNow()
+                }
+                before = now
+            }
+        }
         refreshConfig()
         setUpToken()
         viewModelScope.launch {
@@ -189,7 +204,7 @@ class LessonsViewModel @Inject constructor(
                 // Only on a real offline -> online change: the first reading is not a reconnect, and the
                 // setup at start-up has already had its try.
                 if (online && wasOnline == false && !manager.isConfigured) setUpToken()
-                if (online && manager.isConfigured) {
+                if (online && manager.isConfigured && consent.isAccepted()) {
                     // A real offline -> online change also replaces any WorkManager run that is sitting
                     // in retry backoff, in case this screen is closed before the sync below finishes.
                     if (wasOnline == false) trigger.enqueue(replace = true)
@@ -239,6 +254,7 @@ class LessonsViewModel @Inject constructor(
      * runs when one is already in place.
      */
     private fun setUpToken() {
+        if (!consent.isAccepted()) return // no exchange, and no network call at all, before the notice is accepted
         if (manager.isConfigured || !manager.needsToken || gettingReady) return
         if (!firebase.hasUser()) { refreshConfig(); return }
         if (!connectivity.isOnline()) { setupFailure = OFFLINE_SETUP_MESSAGE; refreshConfig(); return }
@@ -253,6 +269,12 @@ class LessonsViewModel @Inject constructor(
     }
 
     fun retrySignIn() = setUpToken()
+
+    // ---- the Lessons storage notice ----
+
+    fun acceptConsent() = consent.accept()
+    fun declineConsent() = consent.decline()
+    fun reviewConsent() = consent.reconsider()
 
     /** Back from the sign-in screen: whoever signed in is exchanged for a lessons token. */
     fun onSignedIn() = setUpToken()
@@ -281,6 +303,7 @@ class LessonsViewModel @Inject constructor(
     /** @return false when the topic is rejected locally. */
     fun askForLesson(rawTopic: String): Boolean {
         val topic = rawTopic.trim()
+        if (!consent.isAccepted()) return false
         if (!manager.isConfigured) {
             _ui.update { it.copy(notice = "Lessons aren't set up on this build.") }
             return false

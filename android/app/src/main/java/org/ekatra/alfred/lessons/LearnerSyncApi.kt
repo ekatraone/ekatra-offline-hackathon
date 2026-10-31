@@ -14,6 +14,12 @@ interface LearnerSyncApi {
 
     /** Trade a Firebase ID token for a learner JWT. Public: sends no Authorization header. */
     suspend fun exchange(idToken: String): ExchangeOutcome
+
+    /**
+     * Erase this learner's server-side data (account deletion). Uses [token] as given, not the current
+     * one, because a retry may run after the account is gone and a different person has signed in.
+     */
+    suspend fun deleteMe(token: String): DeleteOutcome
 }
 
 /** The public WhatsApp one-time-code endpoints. */

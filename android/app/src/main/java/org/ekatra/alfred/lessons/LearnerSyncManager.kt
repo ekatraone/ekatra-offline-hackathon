@@ -21,7 +21,7 @@ import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 
-enum class SyncStatus { IDLE, RUNNING, SYNCED, OFFLINE, NOT_CONFIGURED, UNAUTHORIZED, ERROR }
+enum class SyncStatus { IDLE, RUNNING, SYNCED, OFFLINE, NOT_CONFIGURED, UNAUTHORIZED, CONSENT_NEEDED, ERROR }
 
 data class SyncReport(
     val status: SyncStatus,
@@ -50,14 +50,9 @@ class LearnerSyncManager @Inject constructor(
     private val config: SyncConfig,
     private val connectivity: Connectivity,
     private val refresher: TokenRefresher,
-    private val localData: LocalLearnerData
+    private val localData: LocalLearnerData,
+    private val consent: LessonsConsent
 ) {
-    /** For tests and callers that have no Firebase user to exchange: tokens come from config alone. */
-    internal constructor(
-        api: LearnerSyncApi, queue: SyncQueueDao, bundles: LessonStore, progress: LessonProgressStore,
-        config: SyncConfig, connectivity: Connectivity
-    ) : this(api, queue, bundles, progress, config, connectivity, NoTokenRefresher, LocalLearnerData(queue, bundles, progress))
-
     companion object {
         private const val TAG = "LearnerSync"
         const val TYPE_LEARNER_EVENT = "learner_event"
@@ -193,6 +188,7 @@ class LearnerSyncManager @Inject constructor(
 
     /** Make sure a token is stored if one can be had (exchange after a Firebase sign-in, or near expiry). */
     suspend fun ensureToken(): Boolean {
+        if (!consent.isAccepted()) return config.isConfigured // no exchange before the Lessons notice is accepted
         val ok = refresher.ensureToken()
         if (ok && _status.value == SyncStatus.NOT_CONFIGURED) _status.value = SyncStatus.IDLE
         return ok
@@ -224,6 +220,8 @@ class LearnerSyncManager @Inject constructor(
      * Neither step overlaps itself.
      */
     suspend fun sync(): SyncReport {
+        // Nothing at all leaves the phone for Lessons until the Lessons notice has been accepted.
+        if (!consent.isAccepted()) return SyncReport(SyncStatus.CONSENT_NEEDED).also { _status.value = it.status }
         // A Firebase user with no token yet, or a token near expiry, gets exchanged here (online only).
         if (connectivity.isOnline()) refresher.ensureToken()
         if (!config.isConfigured) return SyncReport(SyncStatus.NOT_CONFIGURED).also { _status.value = it.status }
@@ -446,10 +444,4 @@ class LearnerSyncManager @Inject constructor(
     private fun parseEvent(item: SyncQueueItem): LearnerEvent? =
         runCatching { gson.fromJson(item.payload, LearnerEvent::class.java) }.getOrNull()
             ?.takeIf { !it.clientEventId.isNullOrBlank() && !it.type.isNullOrBlank() }
-}
-
-/** No Firebase user to exchange: the token, if any, is whatever [SyncConfig] already holds. */
-internal object NoTokenRefresher : TokenRefresher {
-    override suspend fun ensureToken(): Boolean = false
-    override suspend fun refreshAfter401(): Boolean = false
 }

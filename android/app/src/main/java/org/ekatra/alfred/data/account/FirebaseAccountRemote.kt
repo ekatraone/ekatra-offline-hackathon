@@ -14,6 +14,7 @@ import org.ekatra.alfred.data.sync.SyncManager
 import org.ekatra.alfred.lessons.LearnerSyncManager
 import org.ekatra.alfred.lessons.LessonProgressStore
 import org.ekatra.alfred.lessons.LessonStore
+import org.ekatra.alfred.lessons.LessonsConsent
 import org.ekatra.alfred.lessons.SyncConfig
 import javax.inject.Inject
 
@@ -55,7 +56,8 @@ class RoomAccountData @Inject constructor(
     private val syncQueue: SyncQueueDao,
     private val lessons: LessonStore,
     private val lessonProgress: LessonProgressStore,
-    private val lessonsConfig: SyncConfig
+    private val lessonsConfig: SyncConfig,
+    private val lessonsConsent: LessonsConsent
 ) : LocalAccountData {
 
     override suspend fun clear(uid: String) {
@@ -66,6 +68,8 @@ class RoomAccountData @Inject constructor(
         syncQueue.deleteByType(SyncManager.TYPE_CHAT_ANALYTICS)
         syncQueue.deleteByType(LearnerSyncManager.TYPE_LEARNER_EVENT)
         syncQueue.deleteByType(LearnerSyncManager.TYPE_LESSON_REQUEST)
+        // The next person on this phone is asked about Lessons storing a learner record, afresh.
+        lessonsConsent.clear()
         withContext(Dispatchers.IO) {
             lessons.clear()
             lessonProgress.clear()

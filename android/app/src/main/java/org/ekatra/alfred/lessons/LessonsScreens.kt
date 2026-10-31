@@ -24,6 +24,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.compose.ui.res.stringResource
+import org.ekatra.alfred.R
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 
@@ -82,6 +84,7 @@ private fun LessonsTopBar(ui: LessonsUiState, onBack: () -> Unit) {
 // ---------------- sync chip ----------------
 
 internal fun syncChipText(ui: LessonsUiState): String = when {
+    ui.consent != ConsentState.ACCEPTED -> "Needs your OK"
     !ui.configured -> "Not configured"
     ui.syncStatus == SyncStatus.UNAUTHORIZED -> "Sign-in expired"
     ui.syncStatus == SyncStatus.RUNNING -> "Syncing…"
@@ -104,6 +107,26 @@ private fun SyncChip(ui: LessonsUiState, onDark: Boolean = false) {
 }
 
 // ---------------- no token yet ----------------
+
+@Composable
+private fun ConsentCard(ui: LessonsUiState, vm: LessonsViewModel) {
+    Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            if (ui.consent == ConsentState.DECLINED) {
+                Text(stringResource(R.string.lessons_consent_declined_title), fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                Text(stringResource(R.string.lessons_consent_declined_body), fontSize = 14.sp, color = Color(0xFF475569))
+                Button(onClick = vm::reviewConsent) { Text(stringResource(R.string.lessons_consent_review)) }
+            } else {
+                Text(stringResource(R.string.lessons_consent_title), fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                Text(stringResource(R.string.lessons_consent_body), fontSize = 14.sp, color = Color(0xFF334155))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = vm::acceptConsent) { Text(stringResource(R.string.lessons_consent_accept)) }
+                    TextButton(onClick = vm::declineConsent) { Text(stringResource(R.string.lessons_consent_decline)) }
+                }
+            }
+        }
+    }
+}
 
 @Composable
 private fun SignInCard(ui: LessonsUiState, vm: LessonsViewModel, onSignIn: () -> Unit) {
@@ -156,7 +179,10 @@ private fun HomeScreen(ui: LessonsUiState, vm: LessonsViewModel, onSignIn: () ->
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        if (ui.signIn == LessonsSignIn.READY) {
+        if (ui.consent != ConsentState.ACCEPTED) {
+            // Until the notice is accepted there is nothing else to show: nothing is fetched or sent.
+            item { ConsentCard(ui, vm) }
+        } else if (ui.signIn == LessonsSignIn.READY) {
             item {
                 Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {

@@ -27,6 +27,7 @@ class LearnerTokenProviderTest {
     private lateinit var progress: LessonProgressStore
     private lateinit var provider: LearnerTokenProvider
     private lateinit var config: SyncConfig
+    private var consent = acceptedConsent()
 
     private fun jwtIn(days: Long) = fakeJwt((nowMs + days * day) / 1000)
 
@@ -42,7 +43,7 @@ class LearnerTokenProviderTest {
 
     private fun build(buildToken: String) {
         config = SyncConfig("http://x", buildToken, store)
-        provider = LearnerTokenProvider(api, firebase, config, net, LocalLearnerData(dao, bundles, progress)).also { it.now = { nowMs } }
+        provider = LearnerTokenProvider(api, firebase, config, net, LocalLearnerData(dao, bundles, progress), consent).also { it.now = { nowMs } }
     }
 
     // ---- token order ----

@@ -10,6 +10,14 @@ interface TokenStore {
     /** Drop the token but remember which learner it was for. */
     fun clearToken()
     fun clearAll()
+
+    /**
+     * A token kept ONLY so a server-side erase that could not be sent (offline, server down) can be
+     * retried after the account is gone. It survives [clearAll] and is never used for anything else.
+     */
+    fun pendingDeleteToken(): String?
+    fun setPendingDeleteToken(token: String)
+    fun clearPendingDelete()
 }
 
 /**
@@ -31,9 +39,14 @@ class PrefsTokenStore(private val prefs: SharedPreferences) : TokenStore {
     override fun clearToken() { prefs.edit().remove(KEY_TOKEN).commit() }
     override fun clearAll() { prefs.edit().remove(KEY_TOKEN).remove(KEY_LEARNER).commit() }
 
+    override fun pendingDeleteToken(): String? = prefs.getString(KEY_PENDING_DELETE, null)
+    override fun setPendingDeleteToken(token: String) { prefs.edit().putString(KEY_PENDING_DELETE, token).commit() }
+    override fun clearPendingDelete() { prefs.edit().remove(KEY_PENDING_DELETE).commit() }
+
     companion object {
         const val FILE = "lessons_auth"
         private const val KEY_TOKEN = "joined_token"
         private const val KEY_LEARNER = "joined_learner_id"
+        private const val KEY_PENDING_DELETE = "pending_server_delete_token"
     }
 }

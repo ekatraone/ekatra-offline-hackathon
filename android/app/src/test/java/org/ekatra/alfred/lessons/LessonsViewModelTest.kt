@@ -34,6 +34,7 @@ class LessonsViewModelTest {
     private lateinit var trigger: FakeTrigger
     private val mutex = Mutex()
     private val firebase = FakeFirebase()
+    private var consent = acceptedConsent()
     private val io = CountingDispatcher()
     private lateinit var manager: LearnerSyncManager
     private lateinit var vm: LessonsViewModel
@@ -57,10 +58,10 @@ class LessonsViewModelTest {
 
     private fun newVm(config: SyncConfig = SyncConfig("http://x", "tok")): LessonsViewModel {
         // (A config built with a FakeTokenStore lets a test join, expire and sign out.)
-        manager = LearnerSyncManager(api, dao, bundles, progress, config, net).also {
+        manager = testManager(api, dao, bundles, progress, config, net).also {
             it.ioDispatcher = Dispatchers.Unconfined
         }
-        return LessonsViewModel(manager, bundles, progress, net, engine, locator, trigger, mutex, ActivePersona, firebase)
+        return LessonsViewModel(manager, bundles, progress, net, engine, locator, trigger, mutex, ActivePersona, firebase, consent)
             .also { it.ioDispatcher = io; vm = it }
     }
 
@@ -748,9 +749,9 @@ class LessonsViewModelTest {
     ): LessonsViewModel {
         firebase.user = hasUser
         val config = SyncConfig(baseUrl, build, store)
-        manager = LearnerSyncManager(api, dao, bundles, progress, config, net, refresher, LocalLearnerData(dao, bundles, progress))
+        manager = testManager(api, dao, bundles, progress, config, net, refresher, consent)
             .also { it.ioDispatcher = Dispatchers.Unconfined }
-        return LessonsViewModel(manager, bundles, progress, net, engine, locator, trigger, mutex, ActivePersona, firebase)
+        return LessonsViewModel(manager, bundles, progress, net, engine, locator, trigger, mutex, ActivePersona, firebase, consent)
             .also { it.ioDispatcher = io; vm = it }
     }
 
@@ -790,9 +791,9 @@ class LessonsViewModelTest {
         }
         firebase.user = true
         val config = SyncConfig("http://x", "", store)
-        manager = LearnerSyncManager(api, dao, bundles, progress, config, net, refresher, LocalLearnerData(dao, bundles, progress))
+        manager = testManager(api, dao, bundles, progress, config, net, refresher, consent)
             .also { it.ioDispatcher = Dispatchers.Unconfined }
-        val v = LessonsViewModel(manager, bundles, progress, net, engine, locator, trigger, mutex, ActivePersona, firebase)
+        val v = LessonsViewModel(manager, bundles, progress, net, engine, locator, trigger, mutex, ActivePersona, firebase, consent)
             .also { it.ioDispatcher = io }
 
         assertEquals(LessonsSignIn.GETTING_READY, v.uiState.value.signIn)

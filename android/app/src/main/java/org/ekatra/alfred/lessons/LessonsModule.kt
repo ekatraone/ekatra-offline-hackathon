@@ -19,6 +19,7 @@ abstract class LessonsBindingsModule {
     @Binds abstract fun bindFirebaseSession(impl: FirebaseAuthSession): FirebaseSession
     @Binds abstract fun bindTokenRefresher(impl: LearnerTokenProvider): TokenRefresher
     @Binds abstract fun bindSessionHooks(impl: LearnerSession): LearnerSessionHooks
+    @Binds abstract fun bindLearnerAccountRemote(impl: ServerAccountDeletion): LearnerAccountRemote
     @Binds abstract fun bindConnectivity(impl: AndroidConnectivity): Connectivity
 }
 
@@ -35,6 +36,11 @@ object LessonsModule {
      * Base URL and build-time token are blank in release builds. With a base URL but no token, the learner
      * signs in; with no base URL Lessons say they are not set up on this build.
      */
+    @Provides
+    @Singleton
+    fun provideLessonsConsentStore(@ApplicationContext context: Context): LessonsConsentStore =
+        PrefsLessonsConsentStore(context.getSharedPreferences(PrefsLessonsConsentStore.FILE, Context.MODE_PRIVATE))
+
     @Provides
     @Singleton
     fun provideSyncConfig(store: TokenStore): SyncConfig =

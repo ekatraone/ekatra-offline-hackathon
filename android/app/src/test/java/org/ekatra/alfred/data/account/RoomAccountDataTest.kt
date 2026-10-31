@@ -36,6 +36,7 @@ class RoomAccountDataTest {
     private lateinit var data: RoomAccountData
     private lateinit var tokens: org.ekatra.alfred.lessons.FakeTokenStore
     private lateinit var config: org.ekatra.alfred.lessons.SyncConfig
+    private lateinit var consent: org.ekatra.alfred.lessons.LessonsConsent
 
     @Before
     fun setup() {
@@ -48,7 +49,8 @@ class RoomAccountDataTest {
         progress = LessonProgressStore(File(dir, "lesson_progress.json"))
         tokens = org.ekatra.alfred.lessons.FakeTokenStore("joined-token", "learner-1")
         config = org.ekatra.alfred.lessons.SyncConfig("http://x", "", tokens)
-        data = RoomAccountData(chats, profiles, settings, queue, lessons, progress, config)
+        consent = org.ekatra.alfred.lessons.acceptedConsent()
+        data = RoomAccountData(chats, profiles, settings, queue, lessons, progress, config, consent)
     }
 
     @After
@@ -111,6 +113,26 @@ class RoomAccountDataTest {
         assertNull(tokens.token); assertNull(tokens.learner)
         assertFalse(config.isConfigured)
         assertTrue(config.needsToken)
+    }
+
+    @Test
+    fun `the Lessons consent is forgotten with the account, so the next person is asked`() = runBlocking {
+        assertTrue(consent.isAccepted())
+
+        data.clear("uid1")
+
+        assertFalse(consent.isAccepted())
+        assertEquals(org.ekatra.alfred.lessons.ConsentState.NEEDED, consent.state.value)
+    }
+
+    @Test
+    fun `a pending server erase survives the local wipe, because it is the only way to retry it`() = runBlocking {
+        tokens.pendingDelete = "token-of-the-deleted-account"
+
+        data.clear("uid1")
+
+        assertEquals("token-of-the-deleted-account", tokens.pendingDelete)
+        assertNull("the active token is gone", tokens.token)
     }
 
     @Test

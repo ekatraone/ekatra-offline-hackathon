@@ -1,0 +1,111 @@
+diff --git a/app/src/main/java/org/ekatra/alfred/EkatraApp.kt b/app/src/main/java/org/ekatra/alfred/EkatraApp.kt
+index b35c6d8..5c14e95 100644
+--- a/app/src/main/java/org/ekatra/alfred/EkatraApp.kt
++++ b/app/src/main/java/org/ekatra/alfred/EkatraApp.kt
+@@ -9,6 +9,11 @@ import dagger.hilt.android.HiltAndroidApp
+ import org.ekatra.alfred.data.ConsentManager
+ import org.ekatra.alfred.data.RemoteConfigManager
+ import org.ekatra.alfred.data.sync.SyncWorker
++import org.ekatra.alfred.lessons.ServerAccountDeletion
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.launch
+ import org.ekatra.alfred.notification.EkatraMessagingService
+ import javax.inject.Inject
+ 
+@@ -25,7 +30,10 @@ class EkatraApp : Application(), Configuration.Provider {
+     @Inject lateinit var workerFactory: HiltWorkerFactory
+     @Inject lateinit var remoteConfigManager: RemoteConfigManager
+     @Inject lateinit var consentManager: ConsentManager
++    @Inject lateinit var serverDeletion: ServerAccountDeletion
+     
++    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
++
+     // Keep for AlfredServerService access
+     var alfredServer: AlfredServer? = null
+     
+@@ -48,6 +56,9 @@ class EkatraApp : Application(), Configuration.Provider {
+         
+         // Schedule periodic background sync
+         SyncWorker.schedule(this)
++
++        // An account deletion whose server-side erase could not be sent is retried now (needs the network).
++        appScope.launch { runCatching { serverDeletion.retryPending() } }
+         
+         // Fetch latest remote config values (non-blocking, defaults will be used if fails)
+         try {
+diff --git a/app/src/main/java/org/ekatra/alfred/PrivacyConsentActivity.kt b/app/src/main/java/org/ekatra/alfred/PrivacyConsentActivity.kt
+index 52a95ab..02f666d 100644
+--- a/app/src/main/java/org/ekatra/alfred/PrivacyConsentActivity.kt
++++ b/app/src/main/java/org/ekatra/alfred/PrivacyConsentActivity.kt
+@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.dp
+ import androidx.compose.ui.unit.sp
+ import dagger.hilt.android.AndroidEntryPoint
+ import org.ekatra.alfred.data.ConsentManager
++import org.ekatra.alfred.persona.ActivePersona
+ import javax.inject.Inject
+ 
+ /**
+@@ -104,6 +105,8 @@ fun PrivacyConsentScreen(onAccept: (Boolean) -> Unit, onDecline: () -> Unit) {
+                 BulletPoint(stringResource(R.string.privacy_collect_device))
+                 BulletPoint(stringResource(R.string.privacy_collect_crashes))
+                 BulletPoint(stringResource(R.string.privacy_collect_profile))
++                // Only Maya has Lessons; Asmaa's text is left exactly as it was.
++                if (ActivePersona.key == "maya") BulletPoint(stringResource(R.string.privacy_collect_lessons))
+ 
+                 Spacer(Modifier.height(16.dp))
+                 Text(stringResource(R.string.privacy_we_dont_collect), fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+diff --git a/app/src/main/java/org/ekatra/alfred/data/sync/SyncWorker.kt b/app/src/main/java/org/ekatra/alfred/data/sync/SyncWorker.kt
+index 065f5dd..e665825 100644
+--- a/app/src/main/java/org/ekatra/alfred/data/sync/SyncWorker.kt
++++ b/app/src/main/java/org/ekatra/alfred/data/sync/SyncWorker.kt
+@@ -7,6 +7,7 @@ import androidx.work.*
+ import dagger.assisted.Assisted
+ import dagger.assisted.AssistedInject
+ import org.ekatra.alfred.lessons.LearnerSyncManager
++import org.ekatra.alfred.lessons.ServerAccountDeletion
+ import org.ekatra.alfred.lessons.SyncStatus
+ import java.util.concurrent.TimeUnit
+ 
+@@ -19,7 +20,8 @@ class SyncWorker @AssistedInject constructor(
+     @Assisted context: Context,
+     @Assisted workerParams: WorkerParameters,
+     private val syncManager: SyncManager,
+-    private val learnerSyncManager: LearnerSyncManager
++    private val learnerSyncManager: LearnerSyncManager,
++    private val serverDeletion: ServerAccountDeletion
+ ) : CoroutineWorker(context, workerParams) {
+ 
+     companion object {
+@@ -99,6 +101,7 @@ class SyncWorker @AssistedInject constructor(
+             Log.e(TAG, "Analytics sync failed", e)
+             retry = true
+         }
++        runCatching { serverDeletion.retryPending() } // an account-deletion erase that could not be sent earlier
+         try {
+             val report = learnerSyncManager.sync()
+             // 401 will not fix itself on retry; every other failure is worth another attempt.
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 04d9f46..f184846 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -64,6 +64,18 @@
+     <string name="privacy_collect_device">Device model for performance optimization</string>
+     <string name="privacy_collect_crashes">Crash reports to fix bugs</string>
+     <string name="privacy_collect_profile">If you sign in: your name, country, grade, preferred language and phone number (if your sign-in has one), to sync your profile</string>
++    <!-- Lessons (Maya only; the consent screen and Lessons show these only when ActivePersona is Maya).
++         Server-side learner record: created by LearnerTokenProvider.exchange (POST /api/sync/auth/exchange),
++         filled by LearnerSyncManager (events, lesson requests) and erased by ServerAccountDeletion
++         (DELETE /api/sync/me) when the account is deleted. Gated by lessons/LessonsConsent.kt. -->
++    <string name="privacy_collect_lessons">If you use Lessons: your name, contact (phone or email) and lesson progress are stored on Ekatra\'s servers so they sync across your devices and WhatsApp. They are deleted when you delete your account.</string>
++    <string name="lessons_consent_title">Before you use Lessons</string>
++    <string name="lessons_consent_body">When you use Lessons, your name, contact (phone or email) and lesson progress are stored on Ekatra\'s servers so they sync across your devices and WhatsApp. They are deleted when you delete your account.</string>
++    <string name="lessons_consent_accept">Accept &amp; continue</string>
++    <string name="lessons_consent_decline">Not now</string>
++    <string name="lessons_consent_declined_title">Lessons needs this to sync</string>
++    <string name="lessons_consent_declined_body">Lessons keeps your lessons and progress on Ekatra\'s servers so they follow you. Nothing is sent until you agree. Chat works as normal.</string>
++    <string name="lessons_consent_review">Review</string>
+     <string name="privacy_minor_notice">If you are under 18, please read this with a parent or guardian before accepting.</string>
+     <string name="privacy_we_dont_collect">What we DON\'T collect:</string>
+     <string name="privacy_no_messages">Your actual chat messages or questions</string>

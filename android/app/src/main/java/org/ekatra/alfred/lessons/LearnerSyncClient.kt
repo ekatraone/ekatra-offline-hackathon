@@ -102,14 +102,14 @@ class LearnerSyncClient internal constructor(
     private class Raw(val code: Int, val text: String)
 
     /** One HTTP exchange. Throws IOException on a network failure. */
-    private fun send(method: String, path: String, readTimeoutMs: Int, body: Any?, authenticated: Boolean): Raw {
+    private fun send(method: String, path: String, readTimeoutMs: Int, body: Any?, authenticated: Boolean, token: String? = null): Raw {
         var conn: HttpURLConnection? = null
         try {
             conn = openConnection(URL(config.baseUrl.trimEnd('/') + path)).apply {
                 requestMethod = method
                 connectTimeout = CONNECT_TIMEOUT_MS
                 readTimeout = readTimeoutMs
-                if (authenticated) setRequestProperty("Authorization", "Bearer ${config.token}")
+                if (authenticated) setRequestProperty("Authorization", "Bearer ${token ?: config.token}")
                 setRequestProperty("Accept", "application/json")
                 if (body != null) {
                     doOutput = true
@@ -187,6 +187,22 @@ class LearnerSyncClient internal constructor(
                 else -> ExchangeOutcome.Failed(env.error(code))
             }
         }
+
+    override suspend fun deleteMe(token: String): DeleteOutcome = withContext(Dispatchers.IO) {
+        if (config.baseUrl.isBlank()) return@withContext DeleteOutcome.NotConfigured
+        try {
+            val raw = send("DELETE", "/api/sync/me", READ_TIMEOUT_MS, null, authenticated = true, token = token)
+            when {
+                raw.code in 200..299 -> DeleteOutcome.Deleted
+                raw.code == 401 -> DeleteOutcome.Unauthorized
+                else -> DeleteOutcome.Failed(envelope(raw.text).error(raw.code))
+            }
+        } catch (e: IOException) {
+            DeleteOutcome.Failed(e.message ?: e.javaClass.simpleName)
+        } catch (e: RuntimeException) {
+            DeleteOutcome.Failed("Bad response: ${e.message}")
+        }
+    }
 
     override suspend fun whatsappStart(phone: String): StartOutcome =
         publicPost("/api/auth/whatsapp/start", mapOf("phone" to phone), StartOutcome.NotConfigured,

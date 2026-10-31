@@ -42,7 +42,7 @@ class LearnerSyncManagerTest {
     fun cleanup() { dir.deleteRecursively() }
 
     private fun newManager(config: SyncConfig) =
-        LearnerSyncManager(api, dao, bundles, progress, config, net)
+        testManager(api, dao, bundles, progress, config, net)
 
     @Test
     fun `accepted, duplicate and rejected events are all deleted from the queue`() = runTest {
@@ -875,7 +875,7 @@ class LearnerSyncManagerTest {
         Triple<LearnerSyncManager, FakeTokenStore, SyncConfig> {
         val store = FakeTokenStore(token, learner)
         val config = SyncConfig("http://x", build, store)
-        val m = LearnerSyncManager(api, dao, bundles, progress, config, net, refresher, LocalLearnerData(dao, bundles, progress))
+        val m = testManager(api, dao, bundles, progress, config, net, refresher)
         return Triple(m, store, config)
     }
 
