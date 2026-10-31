@@ -23,6 +23,7 @@ export interface LearnerRecord {
   organization_id: string;
   phone: string;
   name: string | null;
+  email?: string | null;
 }
 
 export async function defaultOrganizationId(db: IdentityDb): Promise<string | null> {
@@ -46,7 +47,7 @@ export async function findOrCreateLearnerByPhone(
   const find = async () =>
     (
       await db.raw(
-        `SELECT id, organization_id, phone, name FROM learners
+        `SELECT id, organization_id, phone, name, email FROM learners
          WHERE organization_id = $1 AND (phone = $2 OR phone = $3 OR whatsapp_id = $3)
          ORDER BY created_at ASC LIMIT 1`,
         [organizationId, `+${digits}`, digits],
@@ -60,12 +61,59 @@ export async function findOrCreateLearnerByPhone(
     `INSERT INTO learners (organization_id, phone, whatsapp_id, name, language, timezone)
      VALUES ($1, $2, $2, $3, 'en', $4)
      ON CONFLICT (organization_id, phone) DO NOTHING
-     RETURNING id, organization_id, phone, name`,
+     RETURNING id, organization_id, phone, name, email`,
     [organizationId, digits, input.name?.trim() || 'Friend', input.timezone ?? 'Asia/Kolkata'],
   );
   if (inserted.rows[0]) return { learner: inserted.rows[0], created: true };
 
   // Lost a race with a concurrent insert (e.g. the WhatsApp flow): use that row.
+  const raced = await find();
+  return raced ? { learner: raced, created: false } : null;
+}
+
+/** Channel address of a learner who signed in only through the app (Google/email via Firebase). */
+export const firebaseAddress = (uid: string) => `fb:${uid}`;
+
+/**
+ * Find-or-create the learner for a Firebase user without a phone number. Like "tg:<chat_id>" for
+ * Telegram, the phone column holds the channel address "fb:<uid>"; nothing is ever sent to it.
+ */
+export async function findOrCreateLearnerByFirebaseUid(
+  db: IdentityDb,
+  input: { uid: string; name?: string | null; email?: string | null; organizationId?: string; timezone?: string },
+): Promise<{ learner: LearnerRecord; created: boolean } | null> {
+  const organizationId = input.organizationId ?? (await defaultOrganizationId(db));
+  if (!organizationId) return null;
+  const address = firebaseAddress(input.uid);
+  const email = input.email?.trim().slice(0, 255) || null;
+  const name = (input.name?.trim() || email?.split('@')[0] || 'Friend').slice(0, MAX_NAME_LENGTH);
+
+  const find = async () =>
+    (
+      await db.raw(
+        `SELECT id, organization_id, phone, name, email FROM learners WHERE organization_id = $1 AND phone = $2 LIMIT 1`,
+        [organizationId, address],
+      )
+    ).rows[0] as LearnerRecord | undefined;
+
+  const existing = await find();
+  if (existing) {
+    // Fill in an email learned later; never overwrite what the learner already has.
+    if (email && !existing.email) {
+      await db.raw(`UPDATE learners SET email = $2, updated_at = NOW() WHERE id = $1 AND email IS NULL`, [existing.id, email]);
+      existing.email = email;
+    }
+    return { learner: existing, created: false };
+  }
+
+  const inserted = await db.raw(
+    `INSERT INTO learners (organization_id, phone, name, email, language, timezone)
+     VALUES ($1, $2, $3, $4, 'en', $5)
+     ON CONFLICT (organization_id, phone) DO NOTHING
+     RETURNING id, organization_id, phone, name, email`,
+    [organizationId, address, name, email, input.timezone ?? 'Asia/Kolkata'],
+  );
+  if (inserted.rows[0]) return { learner: inserted.rows[0], created: true };
   const raced = await find();
   return raced ? { learner: raced, created: false } : null;
 }

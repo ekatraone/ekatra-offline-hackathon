@@ -637,7 +637,8 @@ export async function getMe(db: SyncDb, learner: SyncLearner) {
     learner: {
       id: learnerRow.id,
       name: learnerRow.name ?? null,
-      phone: learnerRow.phone,
+      // "fb:<uid>" is a channel address for app-only learners, not a phone number.
+      phone: typeof learnerRow.phone === 'string' && learnerRow.phone.startsWith('fb:') ? null : learnerRow.phone,
       language: learnerRow.language ?? 'en',
     },
     courses: courseRows.map((c: any) => ({

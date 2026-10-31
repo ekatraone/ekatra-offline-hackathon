@@ -17,7 +17,14 @@ import jwt from 'jsonwebtoken';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import rateLimit from 'express-rate-limit';
 import { logger } from '../lib/logger.js';
-import { E164_RE, MAX_NAME_LENGTH, findOrCreateLearnerByPhone, signLearnerToken } from '../services/learnerIdentity.js';
+import { FirebaseAuthLike, getFirebaseAuth } from '../lib/firebaseAdmin.js';
+import {
+  E164_RE,
+  MAX_NAME_LENGTH,
+  findOrCreateLearnerByFirebaseUid,
+  findOrCreateLearnerByPhone,
+  signLearnerToken,
+} from '../services/learnerIdentity.js';
 import {
   SyncDb,
   SyncLearner,
@@ -33,6 +40,8 @@ import {
 export interface SyncRouterDeps {
   db: SyncDb;
   generator: CourseGeneratorLike;
+  /** Firebase Admin for /auth/exchange; defaults to the lazily-initialized real one. */
+  firebase?: () => FirebaseAuthLike | null;
 }
 
 type SyncRequest = Request & { syncLearner?: SyncLearner };
@@ -108,7 +117,7 @@ function fail(res: Response, err: unknown, what: string): void {
   res.status(500).json({ success: false, error: 'Internal error' });
 }
 
-export function createSyncRouter({ db, generator }: SyncRouterDeps): Router {
+export function createSyncRouter({ db, generator, firebase = getFirebaseAuth }: SyncRouterDeps): Router {
   const router = Router();
 
   // Public, registered before the auth middleware: Twilio/WhatsApp fetch these by URL. The
@@ -224,6 +233,75 @@ export function createSyncRouter({ db, generator }: SyncRouterDeps): Router {
         });
       } catch (err) {
         fail(res, err, 'join');
+      }
+    },
+  );
+
+  // ── Firebase ID token → learner JWT (public) ───────────────────────────────
+  router.post(
+    '/auth/exchange',
+    rateLimit({
+      windowMs: 15 * 60_000,
+      max: 60,
+      standardHeaders: true,
+      legacyHeaders: false,
+      message: { success: false, error: 'Too many attempts. Please try again later.' },
+    }),
+    async (req: Request, res: Response) => {
+      try {
+        const auth = firebase();
+        const secret = process.env.JWT_SECRET;
+        if (!auth || !secret) {
+          res.status(503).json({ success: false, error: 'Sign-in is not available right now' });
+          return;
+        }
+        const idToken = req.body?.idToken;
+        if (typeof idToken !== 'string' || !idToken || idToken.length > 8192) {
+          res.status(400).json({ success: false, error: 'idToken is required' });
+          return;
+        }
+        let decoded: Record<string, any>;
+        try {
+          decoded = await auth.verifyIdToken(idToken, true); // true: reject revoked tokens
+        } catch {
+          res.status(401).json({ success: false, error: 'Invalid token' });
+          return;
+        }
+        const uid: unknown = decoded.uid;
+        if (typeof uid !== 'string' || !uid) {
+          res.status(401).json({ success: false, error: 'Invalid token' });
+          return;
+        }
+
+        // A phone identity is the same learner row WhatsApp chats use. For our own "wa:" users the
+        // uid is authoritative (only the server mints it); otherwise Firebase's phone_number
+        // claim or the custom `phone` claim is used.
+        const claimed = decoded.phone_number ?? decoded.phone;
+        const phone = uid.startsWith('wa:') ? `+${uid.slice(3)}` : typeof claimed === 'string' ? claimed : null;
+        if ((uid.startsWith('wa:') || phone) && !(phone && E164_RE.test(phone))) {
+          res.status(401).json({ success: false, error: 'Invalid token' });
+          return;
+        }
+
+        const name = typeof decoded.name === 'string' ? decoded.name : null;
+        const email = typeof decoded.email === 'string' ? decoded.email : null;
+        const result = phone
+          ? await findOrCreateLearnerByPhone(db, { phone, name })
+          : await findOrCreateLearnerByFirebaseUid(db, { uid, name, email });
+        if (!result) {
+          res.status(500).json({ success: false, error: 'Sign-in is not available right now' });
+          return;
+        }
+        const { learner } = result;
+        res.json({
+          success: true,
+          data: {
+            token: signLearnerToken(learner, secret),
+            learner: { id: learner.id, name: learner.name ?? null, phone: phone ?? null, email: learner.email ?? email },
+          },
+        });
+      } catch (err) {
+        fail(res, err, 'auth/exchange');
       }
     },
   );
