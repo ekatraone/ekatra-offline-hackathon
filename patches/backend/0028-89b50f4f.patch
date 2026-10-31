@@ -1,0 +1,64 @@
+diff --git a/apps/backend/src/services/scheduler.ts b/apps/backend/src/services/scheduler.ts
+index 1afcf398..7926cd57 100644
+--- a/apps/backend/src/services/scheduler.ts
++++ b/apps/backend/src/services/scheduler.ts
+@@ -235,6 +235,9 @@ export class SchedulerService {
+             },
+           ));
+ 
++          // No channel for this learner: a permanent skip, never retried, queued or alerted on.
++          if (result.permanent) continue;
++
+           // Fall back to interactive buttons if template fails (e.g. non-Twilio provider)
+           if (!result.success) {
+             await retryAsync(() => messaging.sendInteractiveButtons(learner.phone, {
+diff --git a/packages/delivery/src/__tests__/sendResult.test.ts b/packages/delivery/src/__tests__/sendResult.test.ts
+index 29623b82..70c1ccb8 100644
+--- a/packages/delivery/src/__tests__/sendResult.test.ts
++++ b/packages/delivery/src/__tests__/sendResult.test.ts
+@@ -10,3 +10,9 @@ test('transport errors propagate and successful provider IDs are preserved', asy
+   const sent = { success: true, messageId: 'test-id' };
+   assert.deepEqual(await checkedSend(Promise.resolve(sent)), sent);
+ });
++test('a permanent skip (no channel) is not a failure, so it is never retried or dead-lettered', async () => {
++  const skipped = { success: false, permanent: true, error: 'recipient has no messaging channel (app-only learner)' };
++  assert.deepEqual(await checkedSend(Promise.resolve(skipped)), skipped);
++  // an ordinary failure is still a failure
++  await assert.rejects(checkedSend(Promise.resolve({ success: false, error: 'Rejected' })), /rejected delivery/);
++});
+diff --git a/packages/delivery/src/sendResult.ts b/packages/delivery/src/sendResult.ts
+index 05bd6e2a..f2954b85 100644
+--- a/packages/delivery/src/sendResult.ts
++++ b/packages/delivery/src/sendResult.ts
+@@ -3,6 +3,8 @@ import type { SendResult } from '@ekatra/messaging';
+ /** Providers can report failure without rejecting their promise. */
+ export async function checkedSend(operation: Promise<SendResult>): Promise<SendResult> {
+   const result = await operation;
+-  if (!result.success) throw new Error('Messaging provider rejected delivery');
++  // A permanent skip (recipient has no channel, e.g. an app-only learner) is not a failure:
++  // throwing would send it down the retry / dead-letter paths for a message that can never go out.
++  if (!result.success && !result.permanent) throw new Error('Messaging provider rejected delivery');
+   return result;
+ }
+diff --git a/packages/messaging/src/index.ts b/packages/messaging/src/index.ts
+index e5f31088..dc6d4f2b 100644
+--- a/packages/messaging/src/index.ts
++++ b/packages/messaging/src/index.ts
+@@ -98,6 +98,8 @@ export interface SendResult {
+   success: boolean;
+   messageId?: string;
+   error?: string;
++  /** The recipient can never be reached (no channel). Callers must not retry, queue or alert on it. */
++  permanent?: boolean;
+ }
+ 
+ class CloudAPIProvider {
+@@ -984,7 +986,7 @@ export function isAppOnlyRecipient(to: string): boolean {
+   return to.startsWith('fb:');
+ }
+ 
+-const NO_CHANNEL: SendResult = { success: false, error: 'recipient has no messaging channel (app-only learner)' };
++const NO_CHANNEL: SendResult = { success: false, permanent: true, error: 'recipient has no messaging channel (app-only learner)' };
+ const appOnlyProvider = new Proxy({}, { get: () => async () => NO_CHANNEL }) as unknown as MockProvider;
+ 
+ function providerFor(to: string): CloudAPIProvider | WATIProvider | TwilioProvider | MockProvider | TelegramProvider {
