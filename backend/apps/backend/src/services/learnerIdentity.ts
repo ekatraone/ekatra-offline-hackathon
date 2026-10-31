@@ -31,6 +31,31 @@ export async function defaultOrganizationId(db: IdentityDb): Promise<string | nu
   return found.rows[0]?.id ?? null;
 }
 
+/** Looks a learner up by phone without ever creating one. Matches either stored format or whatsapp_id. */
+export async function findLearnerByPhone(db: IdentityDb, phone: string, organizationId?: string): Promise<LearnerRecord | null> {
+  const org = organizationId ?? (await defaultOrganizationId(db));
+  if (!org) return null;
+  const digits = phoneDigits(phone);
+  const found = await db.raw(
+    `SELECT id, organization_id, phone, name, email FROM learners
+     WHERE organization_id = $1 AND (phone = $2 OR phone = $3 OR whatsapp_id = $3)
+     ORDER BY created_at ASC LIMIT 1`,
+    [org, `+${digits}`, digits],
+  );
+  return (found.rows[0] as LearnerRecord | undefined) ?? null;
+}
+
+/** Looks up the app-only "fb:<uid>" learner without ever creating one. */
+export async function findLearnerByFirebaseUid(db: IdentityDb, uid: string, organizationId?: string): Promise<LearnerRecord | null> {
+  const org = organizationId ?? (await defaultOrganizationId(db));
+  if (!org) return null;
+  const found = await db.raw(
+    `SELECT id, organization_id, phone, name, email FROM learners WHERE organization_id = $1 AND phone = $2 LIMIT 1`,
+    [org, firebaseAddress(uid)],
+  );
+  return (found.rows[0] as LearnerRecord | undefined) ?? null;
+}
+
 /**
  * `phone` must already be E.164 (`+<digits>`). Existing rows are matched by either stored
  * format (or whatsapp_id) within the default organization; new rows are written the way the

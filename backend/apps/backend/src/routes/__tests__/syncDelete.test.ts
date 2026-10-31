@@ -20,16 +20,20 @@ afterEach(() => {
   Object.assign(process.env, savedEnv);
 });
 
-async function startApp(seed: Parameters<typeof makeAuthDb>[0]) {
+async function startApp(seed: Parameters<typeof makeAuthDb>[0], withFirebase = true) {
   const db = makeAuthDb(seed);
+  const firebase = makeFirebase();
   const app = express();
   app.use(express.json());
-  app.use('/api/sync', createSyncRouter({ db, generator: { generate: async () => ({ id: 'x' }) }, firebase: () => makeFirebase() }));
+  app.use('/api/sync', createSyncRouter({ db, generator: { generate: async () => ({ id: 'x' }) }, firebase: () => (withFirebase ? firebase : null) }));
   const server = await new Promise<Server>((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   servers.push(server);
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/sync`;
   const as = (token: string) => ({ Authorization: `Bearer ${token}` });
-  return { db, base, as };
+  const deleteAccount = (claims: object | string) =>
+    fetch(`${base}/auth/account`, { method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idToken: typeof claims === 'string' ? claims : JSON.stringify(claims) }) });
+  return { db, base, as, firebase, deleteAccount };
 }
 
 const tokenFor = (l: { id: string; phone: string }) =>
@@ -126,4 +130,88 @@ test('delete: the orphaned-course cleanup is part of the same single statement',
   assert.match(statements[0], /DELETE FROM learners/, 'courses and learner are deleted by the one statement');
   assert.match(statements[0], /aiGenerated/);
   assert.match(statements[0], /source <> 'authored'/);
+});
+
+// ── DELETE /api/sync/auth/account — Firebase ID token, no learner JWT ─────────
+
+const custom = { firebase: { sign_in_provider: 'custom' } };
+const google = { firebase: { sign_in_provider: 'google.com' } };
+
+test('auth/account: a WhatsApp (wa:) user is deleted, and the response says so', async () => {
+  const { db, deleteAccount } = await startApp([
+    { phone: '919876543210', whatsapp_id: '919876543210', name: 'Asha' },
+    { phone: '919000000001', whatsapp_id: '919000000001', name: 'Other' },
+  ]);
+  const res = await deleteAccount({ uid: 'wa:919876543210', ...custom });
+  assert.equal(res.status, 200);
+  const body: any = await res.json();
+  assert.equal(body.deleted, true);
+  assert.equal(body.data.deleted, true);
+  assert.deepEqual(db.learners.map((l) => l.name), ['Other']);
+});
+
+test('auth/account: a Google/email (fb:) user is deleted, with their sole AI course', async () => {
+  const { db, deleteAccount } = await startApp([{ phone: 'fb:AbC123', name: 'Mira', email: 'mira@example.com' }]);
+  db.courses.push({ id: 'mine', title: 'mine', source: 'ai_generated', fsm_definition_id: null, settings: { aiGenerated: true } });
+  db.enrollments.push({ learner_id: db.learners[0].id, course_id: 'mine' });
+  const body: any = await (await deleteAccount({ uid: 'AbC123', ...google })).json();
+  assert.equal(body.deleted, true);
+  assert.equal(db.learners.length, 0);
+  assert.equal(db.courses.length, 0, 'the orphaned-course cleanup is shared with DELETE /me');
+});
+
+test('auth/account: a Google token spoofing a wa: uid cannot delete the phone learner', async () => {
+  const { db, deleteAccount } = await startApp([{ phone: '919876543210', whatsapp_id: '919876543210', name: 'Victim' }]);
+  for (const firebase of [google.firebase, { sign_in_provider: 'password' }, { sign_in_provider: 'anonymous' }, undefined]) {
+    const res = await deleteAccount({ uid: 'wa:919876543210', phone: '+919876543210', phone_number: '+919876543210', firebase });
+    assert.equal(res.status, 200);
+    assert.equal(((await res.json()) as any).deleted, false, `provider ${firebase?.sign_in_provider}`);
+    assert.equal(db.learners.length, 1, 'the victim\'s row is untouched');
+  }
+});
+
+test('auth/account: a missing learner is 200 deleted:false, and no row is ever created', async () => {
+  const { db, deleteAccount } = await startApp([]);
+  for (const claims of [{ uid: 'wa:919876543210', ...custom }, { uid: 'NoSuchUser', ...google },
+    { uid: 'p1', phone_number: '+919876543210', firebase: { sign_in_provider: 'phone' } }]) {
+    const res = await deleteAccount(claims);
+    assert.equal(res.status, 200);
+    assert.equal(((await res.json()) as any).deleted, false);
+  }
+  assert.equal(db.learners.length, 0, 'deletion must never create a learner');
+});
+
+test('auth/account: an invalid token is 401; a missing one is 400; no Firebase configuration is 503', async () => {
+  const { deleteAccount, base } = await startApp([{ phone: '919876543210', name: 'Asha' }]);
+  assert.equal((await deleteAccount('not-a-token')).status, 401);
+  assert.equal((await deleteAccount({ nouid: true })).status, 401);
+  assert.equal((await deleteAccount({ uid: 'wa:12', ...custom })).status, 401); // malformed trusted phone
+  const none = await fetch(`${base}/auth/account`, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  assert.equal(none.status, 400);
+  const off = await startApp([], false);
+  assert.equal((await off.deleteAccount({ uid: 'x' })).status, 503);
+});
+
+test('auth/account: revocation is NOT checked, so a user mid-way through deleting their Firebase account can finish', async () => {
+  const { deleteAccount, firebase } = await startApp([{ phone: 'fb:u1', name: 'Mira' }]);
+  await deleteAccount({ uid: 'u1', ...google });
+  assert.deepEqual(firebase.calls.verify.map((c) => c.checkRevoked), [false]);
+});
+
+test('auth/account: rate limited to 5 per hour per IP', async () => {
+  const { deleteAccount } = await startApp([]);
+  const statuses: number[] = [];
+  for (let i = 0; i < 7; i++) statuses.push((await deleteAccount({ uid: `u${i}`, ...google })).status);
+  assert.deepEqual(statuses, [200, 200, 200, 200, 200, 429, 429]);
+});
+
+test('auth/account: it is public (no bearer token needed) and uses the same single statement as DELETE /me', async () => {
+  const { db, deleteAccount } = await startApp([{ phone: 'fb:u1', name: 'Mira' }]);
+  const statements: string[] = [];
+  const raw = db.raw.bind(db);
+  db.raw = async (sql: string, p?: any[]) => { if (/DELETE FROM learners/.test(sql)) statements.push(sql); return raw(sql, p); };
+  assert.equal((await deleteAccount({ uid: 'u1', ...google })).status, 200);
+  assert.equal(statements.length, 1);
+  const { DELETE_ACCOUNT_SQL } = await import('../../services/accountDeletion.js');
+  assert.equal(statements[0], DELETE_ACCOUNT_SQL);
 });

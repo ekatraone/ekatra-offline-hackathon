@@ -21,10 +21,14 @@ import { FirebaseAuthLike, getFirebaseAuth } from '../lib/firebaseAdmin.js';
 import {
   E164_RE,
   MAX_NAME_LENGTH,
+  findLearnerByFirebaseUid,
+  findLearnerByPhone,
   findOrCreateLearnerByFirebaseUid,
   findOrCreateLearnerByPhone,
   signLearnerToken,
 } from '../services/learnerIdentity.js';
+import { deleteLearnerAccount } from '../services/accountDeletion.js';
+import { resolveFirebaseIdentity } from '../services/firebaseIdentity.js';
 import {
   SyncDb,
   SyncLearner,
@@ -284,31 +288,12 @@ export function createSyncRouter({ db, generator, firebase = getFirebaseAuth }: 
           res.status(401).json({ success: false, error: 'Invalid token' });
           return;
         }
-        const uid: unknown = decoded.uid;
-        if (typeof uid !== 'string' || !uid) {
+        const identity = resolveFirebaseIdentity(decoded);
+        if (!identity) {
           res.status(401).json({ success: false, error: 'Invalid token' });
           return;
         }
-
-        // A phone identity is the same learner row WhatsApp chats use, and is trusted only from the
-        // sign-in provider that can vouch for it: our own custom token (wa: uid or `phone` claim,
-        // minted only after a verified WhatsApp code) or Firebase phone auth (phone_number).
-        // Any other provider (Google, email, ...) is a plain app-only user, whatever claims it carries.
-        const signInProvider: unknown = decoded.firebase?.sign_in_provider;
-        let phone: string | null = null;
-        let phoneTrusted = false;
-        if (signInProvider === 'custom') {
-          if (uid.startsWith('wa:')) { phone = `+${uid.slice(3)}`; phoneTrusted = true; }
-          else if (typeof decoded.phone === 'string') { phone = decoded.phone; phoneTrusted = true; }
-        } else if (signInProvider === 'phone' && typeof decoded.phone_number === 'string') {
-          phone = decoded.phone_number;
-          phoneTrusted = true;
-        }
-        if (phoneTrusted && !(phone && E164_RE.test(phone))) {
-          res.status(401).json({ success: false, error: 'Invalid token' });
-          return;
-        }
-        if (!phoneTrusted) phone = null;
+        const { uid, phone } = identity;
 
         const name = typeof decoded.name === 'string' ? decoded.name : null;
         const email = typeof decoded.email === 'string' ? decoded.email : null;
@@ -333,47 +318,63 @@ export function createSyncRouter({ db, generator, firebase = getFirebaseAuth }: 
     },
   );
 
+  // ── Account deletion without a learner token (public) ──────────────────────────
+  // For a user whose learner JWT is gone (never opened Lessons on this device, expired, signed in on
+  // another phone): a Firebase ID token proves who they are. The learner is resolved exactly as the
+  // exchange does, but only LOOKED UP, never created. Revocation is not checked, so a user in the
+  // middle of deleting their Firebase account can still finish here.
+  router.delete(
+    '/auth/account',
+    rateLimit({
+      windowMs: 60 * 60_000,
+      max: 5,
+      standardHeaders: true,
+      legacyHeaders: false,
+      message: { success: false, error: 'Too many attempts. Please try again later.' },
+    }),
+    async (req: Request, res: Response) => {
+      try {
+        const auth = firebase();
+        if (!auth) {
+          res.status(503).json({ success: false, error: 'Account deletion is not available right now' });
+          return;
+        }
+        const idToken = req.body?.idToken;
+        if (typeof idToken !== 'string' || !idToken || idToken.length > 8192) {
+          res.status(400).json({ success: false, error: 'idToken is required' });
+          return;
+        }
+        let identity;
+        try {
+          identity = resolveFirebaseIdentity(await auth.verifyIdToken(idToken, false));
+        } catch {
+          identity = null;
+        }
+        if (!identity) {
+          res.status(401).json({ success: false, error: 'Invalid token' });
+          return;
+        }
+        const learner = identity.phone
+          ? await findLearnerByPhone(db, identity.phone)
+          : await findLearnerByFirebaseUid(db, identity.uid);
+        const deleted = learner ? await deleteLearnerAccount(db, learner.id, learner.organization_id) : false;
+        // `deleted` is repeated at the top level for clients that read it there.
+        res.json({ success: true, deleted, data: { deleted } });
+      } catch (err) {
+        fail(res, err, 'auth/account');
+      }
+    },
+  );
+
   router.use(learnerAuth(db));
 
-  // Account deletion. One statement, so it is a single transaction: either everything below goes or
-  // nothing does. Enrollments, lesson_progress, learner_events, quiz_responses, flashcard_progress and
-  // sync_lesson_requests are removed by the learners foreign keys (ON DELETE CASCADE); message_log and
-  // failed_messages only SET NULL, so they are deleted explicitly, as are the sign-in codes and ledger
-  // rows for the number. AI-generated courses that only this learner was enrolled in are deleted too
-  // (their lessons, questions and images cascade); shared and authored courses stay. Every CTE reads the
-  // same pre-delete snapshot, so the "only this learner" test is not fooled by the cascade. Once the learners row is gone the JWT stops working (learnerAuth looks it up).
+  // Account deletion with the learner token. The work (and the explanation of what goes) lives in
+  // services/accountDeletion.ts, shared with DELETE /auth/account. Once the learners row is gone the
+  // JWT stops working (learnerAuth looks the row up).
   router.delete('/me', perLearner(5, 60 * 60_000), async (req: SyncRequest, res: Response) => {
     try {
       const learner = req.syncLearner!;
-      const result = await db.raw(
-        `WITH l AS (
-           SELECT id, phone FROM learners WHERE id = $1 AND organization_id = $2
-         ), numbers AS (
-           SELECT phone AS p FROM l
-           UNION SELECT '+' || regexp_replace(phone, '\\D', '', 'g') FROM l WHERE phone !~ '^fb:'
-         ), orphaned AS (
-           SELECT c.id FROM courses c
-           WHERE c.source <> 'authored' AND c.fsm_definition_id IS NULL
-             AND (c.settings->>'aiGenerated' = 'true' OR c.settings->'generator' IS NOT NULL)
-             AND EXISTS (SELECT 1 FROM enrollments e WHERE e.course_id = c.id AND e.learner_id IN (SELECT id FROM l))
-             AND NOT EXISTS (SELECT 1 FROM enrollments e WHERE e.course_id = c.id AND e.learner_id NOT IN (SELECT id FROM l))
-         ), otp AS (
-           DELETE FROM otp_challenges WHERE phone IN (SELECT p FROM numbers) RETURNING 1
-         ), events AS (
-           DELETE FROM otp_events WHERE phone IN (SELECT p FROM numbers) RETURNING 1
-         ), msgs AS (
-           DELETE FROM message_log WHERE learner_id IN (SELECT id FROM l) RETURNING 1
-         ), failed AS (
-           DELETE FROM failed_messages WHERE learner_id IN (SELECT id FROM l) RETURNING 1
-         ), courses_gone AS (
-           DELETE FROM courses WHERE id IN (SELECT id FROM orphaned) RETURNING id
-         ), gone AS (
-           DELETE FROM learners WHERE id IN (SELECT id FROM l) RETURNING id
-         )
-         SELECT (SELECT COUNT(*) FROM gone)::int AS deleted`,
-        [learner.id, learner.organizationId],
-      );
-      if (!result.rows[0]?.deleted) {
+      if (!(await deleteLearnerAccount(db, learner.id, learner.organizationId))) {
         res.status(404).json({ success: false, error: 'Account not found' });
         return;
       }
