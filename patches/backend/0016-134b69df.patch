@@ -1,0 +1,45 @@
+diff --git a/packages/messaging/src/index.ts b/packages/messaging/src/index.ts
+index fa72dd3a..c641faef 100644
+--- a/packages/messaging/src/index.ts
++++ b/packages/messaging/src/index.ts
+@@ -934,6 +934,40 @@ export function isTelegramRecipient(to: string): boolean {
+   return to.startsWith('tg:');
+ }
+ 
++// ── Public media URLs ──────────────────────────────────────────────────────
++// Generated lesson images are stored as a relative path and made absolute when a bundle or a
++// WhatsApp message is built, so a changed base URL never leaves stale links in the database.
++
++const MEDIA_PATH_RE = /^\/api\/sync\/media\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
++
++/** True for exactly `/api/sync/media/<uuid>`; anything else stored in the database is ignored. */
++export function isMediaPath(value: unknown): value is string {
++  return typeof value === 'string' && MEDIA_PATH_RE.test(value);
++}
++
++/** The media id inside a stored path, or null when the value isn't that exact shape. */
++export function mediaIdFromPath(value: unknown): string | null {
++  return isMediaPath(value) ? value.slice(value.lastIndexOf('/') + 1).toLowerCase() : null;
++}
++
++/**
++ * Origin for public media links: PUBLIC_BASE_URL, else WEBHOOK_BASE_URL. Production needs an
++ * https origin; elsewhere an unset base falls back to localhost for local runs.
++ */
++export function publicBaseUrl(env: Record<string, string | undefined> = process.env): string | null {
++  const configured = (env.PUBLIC_BASE_URL || env.WEBHOOK_BASE_URL || '').trim().replace(/\/+$/, '');
++  if (env.NODE_ENV === 'production') return /^https:\/\/[^/\s]+/i.test(configured) ? configured : null;
++  if (configured) return configured;
++  return `http://localhost:${env.PORT || 3001}`;
++}
++
++/** Absolute URL for a stored media path, or null when the value is junk or no base is configured. */
++export function absoluteMediaUrl(stored: unknown, env: Record<string, string | undefined> = process.env): string | null {
++  if (!isMediaPath(stored)) return null;
++  const base = publicBaseUrl(env);
++  return base ? `${base}${stored}` : null;
++}
++
+ function providerFor(to: string): CloudAPIProvider | WATIProvider | TwilioProvider | MockProvider | TelegramProvider {
+   if (!messagingInstance) throw new Error('Messaging not initialized');
+   if (isTelegramRecipient(to)) {
