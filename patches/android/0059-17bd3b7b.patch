@@ -1,0 +1,143 @@
+diff --git a/app/src/main/java/org/ekatra/alfred/EkatraApp.kt b/app/src/main/java/org/ekatra/alfred/EkatraApp.kt
+index 5c14e95..3a1ee01 100644
+--- a/app/src/main/java/org/ekatra/alfred/EkatraApp.kt
++++ b/app/src/main/java/org/ekatra/alfred/EkatraApp.kt
+@@ -9,11 +9,6 @@ import dagger.hilt.android.HiltAndroidApp
+ import org.ekatra.alfred.data.ConsentManager
+ import org.ekatra.alfred.data.RemoteConfigManager
+ import org.ekatra.alfred.data.sync.SyncWorker
+-import org.ekatra.alfred.lessons.ServerAccountDeletion
+-import kotlinx.coroutines.CoroutineScope
+-import kotlinx.coroutines.Dispatchers
+-import kotlinx.coroutines.SupervisorJob
+-import kotlinx.coroutines.launch
+ import org.ekatra.alfred.notification.EkatraMessagingService
+ import javax.inject.Inject
+ 
+@@ -30,10 +25,7 @@ class EkatraApp : Application(), Configuration.Provider {
+     @Inject lateinit var workerFactory: HiltWorkerFactory
+     @Inject lateinit var remoteConfigManager: RemoteConfigManager
+     @Inject lateinit var consentManager: ConsentManager
+-    @Inject lateinit var serverDeletion: ServerAccountDeletion
+     
+-    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+-
+     // Keep for AlfredServerService access
+     var alfredServer: AlfredServer? = null
+     
+@@ -57,8 +49,6 @@ class EkatraApp : Application(), Configuration.Provider {
+         // Schedule periodic background sync
+         SyncWorker.schedule(this)
+ 
+-        // An account deletion whose server-side erase could not be sent is retried now (needs the network).
+-        appScope.launch { runCatching { serverDeletion.retryPending() } }
+         
+         // Fetch latest remote config values (non-blocking, defaults will be used if fails)
+         try {
+diff --git a/app/src/main/java/org/ekatra/alfred/PrivacyConsentActivity.kt b/app/src/main/java/org/ekatra/alfred/PrivacyConsentActivity.kt
+index 8a29324..647c204 100644
+--- a/app/src/main/java/org/ekatra/alfred/PrivacyConsentActivity.kt
++++ b/app/src/main/java/org/ekatra/alfred/PrivacyConsentActivity.kt
+@@ -52,15 +52,14 @@ class PrivacyConsentActivity : ComponentActivity() {
+                     PrivacyConsentScreen(
+                         onAccept = { feedbackOptIn ->
+                             consentManager.record(collection = true, feedback = feedbackOptIn)
+-                            // This screen shows the Lessons wording on Maya, so continuing covers Lessons too,
+-                            // whichever button is tapped: Lessons is the feature, not analytics.
++                            // Accepting this screen, which shows the Lessons wording on Maya, covers Lessons too.
+                             lessonsConsent.recordFromMainConsentScreen(personaKey = ActivePersona.key)
+                             setResult(RESULT_OK)
+                             finish()
+                         },
+                         onDecline = {
+                             consentManager.record(collection = false, feedback = false)
+-                            lessonsConsent.recordFromMainConsentScreen(personaKey = ActivePersona.key)
++                            // Declining is not agreeing to Lessons: it asks again on first use.
+                             setResult(RESULT_OK)
+                             finish()
+                         }
+diff --git a/app/src/main/java/org/ekatra/alfred/SettingsActivity.kt b/app/src/main/java/org/ekatra/alfred/SettingsActivity.kt
+index cba8837..7dc00f3 100644
+--- a/app/src/main/java/org/ekatra/alfred/SettingsActivity.kt
++++ b/app/src/main/java/org/ekatra/alfred/SettingsActivity.kt
+@@ -512,10 +512,10 @@ fun DeleteAccountDialogs(
+     }
+ 
+     state.failedStep?.let { step ->
+-        val message = if (step == org.ekatra.alfred.data.account.AccountDeleter.Step.REAUTHENTICATION) {
+-            R.string.delete_account_failed_reauth
+-        } else {
+-            R.string.delete_account_failed
++        val message = when (step) {
++            org.ekatra.alfred.data.account.AccountDeleter.Step.REAUTHENTICATION -> R.string.delete_account_failed_reauth
++            org.ekatra.alfred.data.account.AccountDeleter.Step.SERVER -> R.string.delete_account_failed_server
++            else -> R.string.delete_account_failed
+         }
+         AlertDialog(
+             onDismissRequest = onCancel,
+diff --git a/app/src/main/java/org/ekatra/alfred/data/sync/SyncWorker.kt b/app/src/main/java/org/ekatra/alfred/data/sync/SyncWorker.kt
+index e665825..065f5dd 100644
+--- a/app/src/main/java/org/ekatra/alfred/data/sync/SyncWorker.kt
++++ b/app/src/main/java/org/ekatra/alfred/data/sync/SyncWorker.kt
+@@ -7,7 +7,6 @@ import androidx.work.*
+ import dagger.assisted.Assisted
+ import dagger.assisted.AssistedInject
+ import org.ekatra.alfred.lessons.LearnerSyncManager
+-import org.ekatra.alfred.lessons.ServerAccountDeletion
+ import org.ekatra.alfred.lessons.SyncStatus
+ import java.util.concurrent.TimeUnit
+ 
+@@ -20,8 +19,7 @@ class SyncWorker @AssistedInject constructor(
+     @Assisted context: Context,
+     @Assisted workerParams: WorkerParameters,
+     private val syncManager: SyncManager,
+-    private val learnerSyncManager: LearnerSyncManager,
+-    private val serverDeletion: ServerAccountDeletion
++    private val learnerSyncManager: LearnerSyncManager
+ ) : CoroutineWorker(context, workerParams) {
+ 
+     companion object {
+@@ -101,7 +99,6 @@ class SyncWorker @AssistedInject constructor(
+             Log.e(TAG, "Analytics sync failed", e)
+             retry = true
+         }
+-        runCatching { serverDeletion.retryPending() } // an account-deletion erase that could not be sent earlier
+         try {
+             val report = learnerSyncManager.sync()
+             // 401 will not fix itself on retry; every other failure is worth another attempt.
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 379ccc9..fb58c15 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -68,11 +68,11 @@
+          Server-side learner record: created by LearnerTokenProvider.exchange (POST /api/sync/auth/exchange),
+          filled by LearnerSyncManager (events, lesson requests) and erased by ServerAccountDeletion
+          (DELETE /api/sync/me, or POST /api/sync/auth/account/delete by ID token when no learner token exists) when the
+-         account is deleted. The lesson topic is sent to Meta's model by the server (POST /api/sync/lessons/request).
++         account is deleted; the deletion stops if the server cannot be reached (AccountDeleter.Step.SERVER). The lesson topic is sent to Meta's model by the server (POST /api/sync/lessons/request).
+          Gated by lessons/LessonsConsent.kt. -->
+-    <string name="privacy_collect_lessons">If you use Lessons: the topic you type is sent to Meta\'s AI to create the lesson. Your name, contact (phone or email) and lesson progress are stored on Ekatra\'s servers so they sync across your devices and WhatsApp. They are deleted when you delete your account, as soon as you\'re online if you\'re offline at the time.</string>
++    <string name="privacy_collect_lessons">If you use Lessons: the topic you type is sent to Meta\'s AI to create the lesson. Your name, contact (phone or email) and lesson progress are stored on Ekatra\'s servers so they sync across your devices and WhatsApp. They are deleted when you delete your account.</string>
+     <string name="lessons_consent_title">Before you use Lessons</string>
+-    <string name="lessons_consent_body">When you use Lessons, the topic you type is sent to Meta\'s AI to create the lesson. Your name, contact (phone or email) and lesson progress are stored on Ekatra\'s servers so they sync across your devices and WhatsApp. They are deleted when you delete your account, as soon as you\'re online if you\'re offline at the time.</string>
++    <string name="lessons_consent_body">When you use Lessons, the topic you type is sent to Meta\'s AI to create the lesson. Your name, contact (phone or email) and lesson progress are stored on Ekatra\'s servers so they sync across your devices and WhatsApp. They are deleted when you delete your account.</string>
+     <string name="lessons_consent_accept">Accept &amp; continue</string>
+     <string name="lessons_consent_decline">Not now</string>
+     <string name="lessons_consent_declined_title">Lessons needs this to sync</string>
+@@ -166,7 +166,7 @@
+     <string name="settings_delete_account">Delete account</string>
+     <string name="settings_delete_account_sub">Permanently delete your account and data</string>
+     <string name="delete_account_title">Delete your account?</string>
+-    <string name="delete_account_message">This permanently deletes your account, your profile and your synced data. This also deletes your lessons and progress on Ekatra\'s servers, including your WhatsApp lesson history. Chats stored on this device are also removed. This cannot be undone.</string>
++    <string name="delete_account_message">This permanently deletes your account, your profile and your synced data. This also deletes your lessons and progress on Ekatra\'s servers, including your WhatsApp lesson history. You need to be online to do this. Chats stored on this device are also removed. This cannot be undone.</string>
+     <string name="delete_account_confirm">Delete account</string>
+     <string name="delete_account_cancel">Cancel</string>
+     <string name="delete_account_password_title">Confirm your password</string>
+@@ -175,6 +175,7 @@
+     <string name="delete_account_password_submit">Continue</string>
+     <string name="delete_account_in_progress">Deleting your account…</string>
+     <string name="delete_account_failed">We could not delete your account. Check your connection and try again.</string>
++    <string name="delete_account_failed_server">Couldn\'t reach Ekatra to delete your lessons — check your connection and try again.</string>
+     <string name="delete_account_failed_reauth">We could not confirm your identity, so your account was not deleted. Try again.</string>
+     <string name="delete_account_retry">Try again</string>
+     <string name="settings_log_out">Log Out</string>

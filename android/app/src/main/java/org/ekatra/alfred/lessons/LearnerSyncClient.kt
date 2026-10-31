@@ -99,21 +99,25 @@ class LearnerSyncClient internal constructor(
         return out.toByteArray()
     }
 
-    private class Raw(val code: Int, val text: String)
+    internal class Raw(val code: Int, val text: String)
 
-    /** One HTTP exchange. Throws IOException on a network failure. */
-    private fun send(method: String, path: String, readTimeoutMs: Int, body: Any?, authenticated: Boolean, token: String? = null): Raw {
+    /**
+     * One HTTP exchange. Throws IOException on a network failure.
+     *
+     * Redirects are never followed, authenticated or not: a bearer token, an ID token or a one-time code must not
+     * be re-sent to wherever a response points. A body is only ever written on a POST, because Android's
+     * HttpURLConnection can refuse one on other methods (a DELETE with a body throws ProtocolException).
+     */
+    internal fun send(method: String, path: String, readTimeoutMs: Int, body: Any?, authenticated: Boolean, token: String? = null): Raw {
+        require(body == null || method == "POST") { "Only a POST carries a body, not $method" }
         var conn: HttpURLConnection? = null
         try {
             conn = openConnection(URL(config.baseUrl.trimEnd('/') + path)).apply {
                 requestMethod = method
                 connectTimeout = CONNECT_TIMEOUT_MS
                 readTimeout = readTimeoutMs
-                if (authenticated) {
-                    // Never follow a redirect with the bearer token attached: it could be sent to another host.
-                    instanceFollowRedirects = false
-                    setRequestProperty("Authorization", "Bearer ${token ?: config.token}")
-                }
+                instanceFollowRedirects = false
+                if (authenticated) setRequestProperty("Authorization", "Bearer ${token ?: config.token}")
                 setRequestProperty("Accept", "application/json")
                 if (body != null) {
                     doOutput = true

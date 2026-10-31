@@ -8,6 +8,7 @@ import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import org.ekatra.alfred.BuildConfig
+import org.ekatra.alfred.persona.ActivePersona
 import java.io.File
 import javax.inject.Singleton
 
@@ -19,7 +20,6 @@ abstract class LessonsBindingsModule {
     @Binds abstract fun bindFirebaseSession(impl: FirebaseAuthSession): FirebaseSession
     @Binds abstract fun bindTokenRefresher(impl: LearnerTokenProvider): TokenRefresher
     @Binds abstract fun bindSessionHooks(impl: LearnerSession): LearnerSessionHooks
-    @Binds abstract fun bindLearnerAccountRemote(impl: ServerAccountDeletion): LearnerAccountRemote
     @Binds abstract fun bindConnectivity(impl: AndroidConnectivity): Connectivity
 }
 
@@ -40,6 +40,14 @@ object LessonsModule {
     @Singleton
     fun provideLessonsConsentStore(@ApplicationContext context: Context): LessonsConsentStore =
         PrefsLessonsConsentStore(context.getSharedPreferences(PrefsLessonsConsentStore.FILE, Context.MODE_PRIVATE))
+
+    @Provides
+    @Singleton
+    fun provideLearnerAccountRemote(
+        api: LearnerSyncApi, config: SyncConfig, connectivity: Connectivity, firebase: FirebaseSession
+    ): LearnerAccountRemote = ServerAccountDeletion(
+        api, config, connectivity, firebase, lessonsEnabled = personaHasLessons(ActivePersona.key)
+    )
 
     @Provides
     @Singleton

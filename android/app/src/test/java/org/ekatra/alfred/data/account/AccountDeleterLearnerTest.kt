@@ -24,24 +24,37 @@ class AccountDeleterLearnerTest {
         override suspend fun clear(uid: String) { calls += "local" }
     }
 
-    private inner class Learner : LearnerAccountRemote {
-        override suspend fun eraseLearner() { calls += "learner" }
+    private inner class Learner(private val result: Boolean = true) : LearnerAccountRemote {
+        override suspend fun eraseLearner(): Boolean { calls += "learner"; return result }
     }
 
     @Test
-    fun `the learner is erased before the Firebase user, and local data goes last`() = runBlocking {
+    fun `the learner is erased first, and the Firebase user and local data go only after it succeeds`() = runBlocking {
         val result = AccountDeleter(Remote(), Local(), Learner()).delete("u") { error("no reauth") }
 
         assertEquals(DeletionResult.Deleted, result)
-        assertEquals(listOf("analytics", "profile", "learner", "auth", "local"), calls)
+        assertEquals(listOf("learner", "analytics", "profile", "auth", "local"), calls)
     }
 
     @Test
-    fun `if cloud deletion fails first, the learner is not touched and the account stays intact`() = runBlocking {
-        val result = AccountDeleter(Remote(analyticsError = RuntimeException("offline")), Local(), Learner()).delete("u") { false }
+    fun `if the server erase cannot be confirmed nothing else is deleted`() = runBlocking {
+        val result = AccountDeleter(Remote(), Local(), Learner(result = false)).delete("u") { error("no reauth") }
 
         assertTrue(result is DeletionResult.Failed)
-        assertEquals(listOf("analytics"), calls)
+        assertEquals(AccountDeleter.Step.SERVER, (result as DeletionResult.Failed).step)
+        assertEquals("no analytics, profile, Firebase user or local data was touched", listOf("learner"), calls)
+    }
+
+    @Test
+    fun `after a failed server erase the whole deletion can simply be tried again`() = runBlocking {
+        var up = false
+        val flaky = object : LearnerAccountRemote { override suspend fun eraseLearner(): Boolean { calls += "learner"; return up } }
+        val deleter = AccountDeleter(Remote(), Local(), flaky)
+
+        assertTrue(deleter.delete("u") { false } is DeletionResult.Failed)
+        up = true
+        assertEquals(DeletionResult.Deleted, deleter.delete("u") { false })
+        assertEquals(listOf("learner", "learner", "analytics", "profile", "auth", "local"), calls)
     }
 
     @Test
@@ -51,18 +64,15 @@ class AccountDeleterLearnerTest {
         val result = AccountDeleter(remote, Local(), Learner()).delete("u") { true }
 
         assertEquals(DeletionResult.Deleted, result)
-        assertEquals(listOf("analytics", "profile", "learner", "auth", "auth", "local"), calls)
+        assertEquals(listOf("learner", "analytics", "profile", "auth", "auth", "local"), calls)
     }
 
     @Test
-    fun `the deletion completes even though the erase could not be sent`() = runBlocking {
-        // The real implementation records a pending erase and returns normally; the deleter just carries on.
-        val quietFailure = object : LearnerAccountRemote { override suspend fun eraseLearner() { calls += "learner(queued for retry)" } }
+    fun `cloud data failing after the server erase stops there and keeps the account`() = runBlocking {
+        val result = AccountDeleter(Remote(analyticsError = RuntimeException("offline")), Local(), Learner()).delete("u") { false }
 
-        val result = AccountDeleter(Remote(), Local(), quietFailure).delete("u") { error("no reauth") }
-
-        assertEquals(DeletionResult.Deleted, result)
-        assertEquals("local", calls.last())
+        assertEquals(AccountDeleter.Step.ANALYTICS, (result as DeletionResult.Failed).step)
+        assertEquals(listOf("learner", "analytics"), calls)
     }
 
     @Test
@@ -70,5 +80,13 @@ class AccountDeleterLearnerTest {
         val result = AccountDeleter(Remote(), Local()).delete("u") { error("no reauth") }
         assertEquals(DeletionResult.Deleted, result)
         assertEquals(listOf("analytics", "profile", "auth", "local"), calls)
+    }
+
+    @Test
+    fun `the settings dialog has its own message for the server step`() {
+        val settings = java.io.File("src/main/java/org/ekatra/alfred/SettingsActivity.kt").readText()
+        assertTrue(settings.contains("AccountDeleter.Step.SERVER -> R.string.delete_account_failed_server"))
+        val strings = java.io.File("src/main/res/values/strings.xml").readText()
+        assertTrue(strings.contains("""<string name="delete_account_failed_server">Couldn\'t reach Ekatra to delete your lessons — check your connection and try again.</string>"""))
     }
 }

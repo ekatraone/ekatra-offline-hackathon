@@ -7,9 +7,9 @@ import javax.inject.Inject
 /**
  * Runs the account deletion sequence (milestone 2, criteria 1, 2 and 4).
  *
- * Remote data is removed before the Firebase Auth user, so a failure part-way leaves the
- * account intact and retryable. The learner record on the Ekatra server goes just before the Auth
- * user. Local data is cleared last, after the Auth user is gone.
+ * The learner record on the Ekatra server is erased first, and the deletion stops there if that cannot be
+ * confirmed. Remote data is removed before the Firebase Auth user, so a failure part-way leaves the account
+ * intact and retryable. Local data is cleared last, after the Auth user is gone.
  *
  * FCM tokens are not written to Firestore (see EkatraMessagingService), so there is nothing
  * to delete for them and no step covers them. Feedback is anonymous and is not deleted here.
@@ -23,6 +23,12 @@ class AccountDeleter @Inject constructor(
     constructor(remote: AccountRemote, local: LocalAccountData) : this(remote, local, NoLearnerAccountRemote)
 
     suspend fun delete(uid: String, reauthenticate: suspend () -> Boolean): DeletionResult {
+        // All-or-nothing: the learner record on the Ekatra server is erased FIRST, and if that cannot be
+        // confirmed nothing else is touched. Once the Firebase user is gone the server can no longer be told
+        // who to erase, so it can never be done "later". Retrying the whole deletion is safe.
+        if (!learner.eraseLearner()) {
+            return DeletionResult.Failed(Step.SERVER, IllegalStateException("The Ekatra server could not be reached to erase the learner"))
+        }
         try {
             remote.deleteAnalytics(uid)
         } catch (e: Exception) {
@@ -33,10 +39,6 @@ class AccountDeleter @Inject constructor(
         } catch (e: Exception) {
             return DeletionResult.Failed(Step.PROFILE, e)
         }
-
-        // The learner record on the Ekatra server goes before the Firebase user does, while the learner token
-        // can still be had. It never fails the deletion: if it cannot be sent it is recorded and retried.
-        learner.eraseLearner()
 
         try {
             remote.deleteAuthUser()
@@ -56,7 +58,7 @@ class AccountDeleter @Inject constructor(
         return DeletionResult.Deleted
     }
 
-    enum class Step { ANALYTICS, PROFILE, REAUTHENTICATION, AUTH }
+    enum class Step { SERVER, ANALYTICS, PROFILE, REAUTHENTICATION, AUTH }
 }
 
 sealed interface DeletionResult {

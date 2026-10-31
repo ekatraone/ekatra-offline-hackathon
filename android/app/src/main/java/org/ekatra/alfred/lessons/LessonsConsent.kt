@@ -10,10 +10,13 @@ import javax.inject.Singleton
 fun personaHasLessons(personaKey: String): Boolean = personaKey == "maya"
 
 /**
- * What the main consent screen does for Lessons. On Maya that screen carries the same Lessons wording as the
- * Lessons notice, so seeing it and continuing, by EITHER button, records the current Lessons version and a fresh
- * install is not asked twice. Lessons is the feature working, not analytics: the analytics choice is not
- * consulted. People who saw an older screen, which had no Lessons line, have no Lessons version and are asked once.
+ * What the main consent screen's ACCEPT button does for Lessons. On Maya that screen carries the same Lessons
+ * wording as the Lessons notice (including that the topic goes to Meta's AI and that data is stored on Ekatra's
+ * servers), so accepting it records the current Lessons version and a fresh install is not asked twice.
+ *
+ * "Continue without analytics" does NOT call this. A decline button must not count as agreeing to server
+ * storage or to Meta processing: after declining, Lessons and the WhatsApp sign-in ask on first use. People who
+ * saw an older screen, which had no Lessons line, have no Lessons version and are asked once too.
  */
 fun LessonsConsent.recordFromMainConsentScreen(personaKey: String) {
     if (personaHasLessons(personaKey)) accept()

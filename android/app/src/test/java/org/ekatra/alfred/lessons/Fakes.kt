@@ -165,17 +165,7 @@ fun sampleBundleWithImages(courseId: String = "course-1", lessonId: String = "le
     )
 }
 
-class FakeTokenStore(
-    var token: String? = null,
-    var learner: String? = null,
-    val pendingDeletes: MutableSet<String> = mutableSetOf(),
-    var pendingIdUid: String? = null
-) : TokenStore {
-    override fun pendingDeleteTokens(): Set<String> = pendingDeletes.toSet()
-    override fun addPendingDeleteToken(token: String) { pendingDeletes += token }
-    override fun removePendingDeleteToken(token: String) { pendingDeletes -= token }
-    override fun pendingIdEraseUid() = pendingIdUid
-    override fun setPendingIdEraseUid(uid: String?) { pendingIdUid = uid }
+class FakeTokenStore(var token: String? = null, var learner: String? = null) : TokenStore {
     override fun token() = token
     override fun learnerId() = learner
     override fun save(token: String, learnerId: String?) { this.token = token; if (learnerId != null) learner = learnerId }

@@ -141,13 +141,15 @@ class LessonsConsentTest {
     }
 
     @Test
-    fun `it is recorded for Accept and for Continue without analytics alike, because Lessons is not analytics`() {
-        // The function takes no analytics choice at all, so no button can change the outcome.
-        for (analyticsChoice in listOf(true, false)) {
-            val c = consentAt()
-            c.recordFromMainConsentScreen(personaKey = "maya")   // same call whichever button was tapped
-            assertTrue("analytics=$analyticsChoice", c.isAccepted())
-        }
+    fun `declining analytics is not agreeing to Lessons, so Lessons is still asked on first use`() {
+        // "Continue without analytics" never calls the recording function, so a fresh install that declines
+        // still has no Lessons version.
+        val c = consentAt()
+        assertEquals(ConsentState.NEEDED, c.state.value)
+        assertFalse(c.isAccepted())
+        // ...and the first-use paths that ask are the Lessons notice and the WhatsApp screen.
+        c.accept()
+        assertTrue(c.isAccepted())
     }
 
     @Test
@@ -168,14 +170,14 @@ class LessonsConsentTest {
     }
 
     @Test
-    fun `the consent screen records Lessons for both buttons, with the same Maya check as the bullet`() {
+    fun `only the Accept button records Lessons consent, the decline button does not`() {
         val screen = res("main/java/org/ekatra/alfred/PrivacyConsentActivity.kt")
         val call = "lessonsConsent.recordFromMainConsentScreen(personaKey = ActivePersona.key)"
-        assertEquals("once in onAccept and once in onDecline", 2, screen.windowed(call.length).count { it == call })
+        assertEquals("exactly one call", 1, screen.windowed(call.length).count { it == call })
         val accept = screen.substringAfter("onAccept = {").substringBefore("onDecline = {")
         val decline = screen.substringAfter("onDecline = {")
-        assertTrue(accept.contains(call)); assertTrue(decline.contains(call))
-        assertFalse("the analytics choice is not passed in", screen.contains("recordFromMainConsentScreen(accepted"))
+        assertTrue("in onAccept", accept.contains(call))
+        assertFalse("not in onDecline", decline.contains("recordFromMainConsentScreen") || decline.contains("lessonsConsent.accept"))
         assertTrue(screen.contains("if (personaHasLessons(ActivePersona.key)) BulletPoint(stringResource(R.string.privacy_collect_lessons))"))
     }
 
@@ -348,7 +350,7 @@ class LessonsConsentTest {
     private fun res(path: String) = File("src/$path").readText()
 
     @Test
-    fun `the Lessons notice says what is sent to Meta, what is stored where, why, and when it is deleted`() {
+    fun `the Lessons notice says what is sent to Meta, what is stored where, why, and that it is deleted with the account`() {
         val strings = res("main/res/values/strings.xml")
         for (name in listOf("lessons_consent_body", "privacy_collect_lessons")) {
             val text = Regex("""<string name="$name">(.*?)</string>""", RegexOption.DOT_MATCHES_ALL).find(strings)?.groupValues?.get(1)
@@ -356,10 +358,13 @@ class LessonsConsentTest {
             for (phrase in listOf(
                 "the topic you type is sent to Meta\\'s AI to create the lesson",
                 "name", "contact (phone or email)", "lesson progress", "stored on Ekatra\\'s servers", "sync across", "WhatsApp",
-                "deleted when you delete your account", "as soon as you\\'re online if you\\'re offline at the time"
+                "deleted when you delete your account"
             )) {
                 assertTrue("$name should mention '$phrase'", text!!.contains(phrase))
             }
+            // Deletion is all-or-nothing now: it needs the server, so there is no "when you are back online".
+            assertFalse("$name must not promise a later deletion", text!!.contains("as soon as you"))
+            assertFalse(text.contains("offline at the time"))
         }
     }
 
@@ -389,6 +394,7 @@ class LessonsConsentTest {
             .find(strings)?.groupValues?.get(1) ?: error("delete_account_message missing")
 
         assertTrue(message.contains("This also deletes your lessons and progress on Ekatra\\'s servers, including your WhatsApp lesson history."))
+        assertTrue("deletion needs the server, so the dialog says so", message.contains("You need to be online"))
         // The existing promises are all still there.
         assertTrue(message.contains("permanently deletes your account"))
         assertTrue(message.contains("Chats stored on this device are also removed"))
