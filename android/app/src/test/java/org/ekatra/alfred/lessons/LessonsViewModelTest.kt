@@ -65,6 +65,13 @@ class LessonsViewModelTest {
     private fun queuedEvents() = dao.items.filter { it.type == "learner_event" }
         .map { com.google.gson.Gson().fromJson(it.payload, LearnerEvent::class.java) }
 
+    private fun assertFallback(text: String, reasonContains: String? = null) {
+        val e = vm.uiState.value.explain as? ExplainState.Fallback
+            ?: error("expected Fallback but was ${vm.uiState.value.explain}")
+        assertEquals(text, e.text)
+        if (reasonContains != null) assertTrue("reason '${e.reason}' should mention '$reasonContains'", e.reason.contains(reasonContains))
+    }
+
     private fun openQuiz() {
         vm.openLesson(course, lesson)
         vm.startQuiz()
@@ -136,7 +143,7 @@ class LessonsViewModelTest {
         vm.answer("A") // wrong
 
         val explain = vm.uiState.value.explain
-        assertEquals(ExplainState.Done("Half of 10 is 5."), explain)
+        assertEquals(ExplainState.Done("Half of 10 is 5.", "Llama 3.2 1B Instruct"), explain)
         assertEquals(1, engine.loadCalls)
         assertEquals(true, engine.mutexHeldWhileGenerating)
         assertFalse("mutex must be released afterwards", mutex.isLocked)
@@ -174,7 +181,7 @@ class LessonsViewModelTest {
 
         vm.answer("A")
 
-        assertEquals(ExplainState.Fallback("Half of ten is five."), vm.uiState.value.explain)
+        assertFallback("Half of ten is five.")
         assertEquals(0, engine.prompts.size)
     }
 
@@ -186,7 +193,7 @@ class LessonsViewModelTest {
 
         vm.answer("A")
 
-        assertEquals(ExplainState.Fallback("Half of ten is five."), vm.uiState.value.explain)
+        assertFallback("Half of ten is five.")
         assertFalse(mutex.isLocked)
     }
 
@@ -207,10 +214,10 @@ class LessonsViewModelTest {
         openQuiz()
 
         vm.answer("A")
-        assertEquals(ExplainState.Loading, vm.uiState.value.explain)
+        assertEquals(ExplainState.Loading("Llama 3.2 1B Instruct"), vm.uiState.value.explain)
         advanceTimeBy(1_001)
 
-        assertEquals(ExplainState.Fallback("Half of ten is five."), vm.uiState.value.explain)
+        assertFallback("Half of ten is five.")
         assertFalse("mutex must be released after a timeout", mutex.isLocked)
     }
 
@@ -407,7 +414,7 @@ class LessonsViewModelTest {
         val quiz = vm.uiState.value.quiz
         assertEquals("A", quiz.selected)
         assertEquals(false, quiz.correct)
-        assertEquals(ExplainState.Fallback("Half of ten is five."), vm.uiState.value.explain)
+        assertFallback("Half of ten is five.")
         vm.answer("B")
         assertEquals("tapping again must not change or resend the answer", listOf(first), queuedEvents())
         assertEquals("A", progress.answerFor("q1")?.answer)
@@ -468,5 +475,114 @@ class LessonsViewModelTest {
         val ids = queuedEvents().map { it.clientEventId }
         assertEquals(2, ids.size)
         assertEquals("the server will count the second as a duplicate", ids[0], ids[1])
+    }
+
+    // ---- model naming and explainer timeouts ----
+
+    @Test
+    fun `the explain card names the model that was actually used`() = runTest {
+        locator.model = LocatedModel("lfm2.5-1.2b-instruct", File("/models/lfm.gguf"), "LFM2.5 1.2B Instruct")
+        newVm(); net.online = false
+        openQuiz()
+
+        vm.answer("A")
+
+        val done = vm.uiState.value.explain as ExplainState.Done
+        assertEquals("LFM2.5 1.2B Instruct", done.modelName)
+        assertEquals("Explained by LFM2.5 1.2B Instruct on this phone", explainCredit(done))
+        // The prompt follows the model that is really loaded, not Llama.
+        assertTrue(engine.prompts.single().startsWith("<|im_start|>system"))
+    }
+
+    @Test
+    fun `a fallback is labelled as the lesson's text with the reason`() {
+        val credit = explainCredit(ExplainState.Fallback("x", "Maya was busy with another answer"))!!
+        assertTrue(credit.contains("not written by the model"))
+        assertTrue(credit.contains("Maya was busy with another answer"))
+        assertEquals("Llama 3.2 1B Instruct is thinking on this phone…", explainCredit(ExplainState.Loading("Llama 3.2 1B Instruct")))
+    }
+
+    @Test
+    fun `the explainer waits 25 seconds for a first token while chat keeps 120`() = runTest {
+        assertEquals(25_000L, LessonsViewModel.EXPLAIN_FIRST_TOKEN_MS)
+        assertEquals(10_000L, LessonsViewModel.EXPLAIN_MUTEX_WAIT_MS)
+        assertEquals(120_000L, ActivePersona.firstTokenTimeoutMs)
+        engine.hang = true
+        newVm(); net.online = false
+        openQuiz()
+
+        vm.answer("A")
+        advanceTimeBy(24_000)
+        assertTrue("still waiting at 24 s", vm.uiState.value.explain is ExplainState.Loading)
+        advanceTimeBy(1_500)
+
+        assertFallback("Half of ten is five.", "too long")
+    }
+
+    @Test
+    fun `when chat holds the inference mutex the explainer waits about 10 seconds then falls back and says so`() = runTest {
+        newVm(); net.online = false
+        openQuiz()
+        mutex.lock() // chat or host mode is generating
+
+        vm.answer("A")
+        advanceTimeBy(9_000)
+        assertTrue("still waiting at 9 s", vm.uiState.value.explain is ExplainState.Loading)
+        advanceTimeBy(1_500)
+
+        assertFallback("Half of ten is five.", "busy")
+        assertEquals("the model is never called while the mutex is held elsewhere", 0, engine.prompts.size)
+        assertTrue("the other holder keeps its lock", mutex.isLocked)
+        mutex.unlock()
+    }
+
+    @Test
+    fun `a mutex that frees up in time lets the explainer run`() = runTest {
+        newVm(); net.online = false
+        openQuiz()
+        mutex.lock()
+
+        vm.answer("A")
+        advanceTimeBy(5_000)
+        mutex.unlock()
+        advanceTimeBy(100)
+
+        assertTrue(vm.uiState.value.explain is ExplainState.Done)
+        assertFalse(mutex.isLocked)
+    }
+
+    // ---- completion screen honesty ----
+
+    @Test
+    fun `remote activity is claimed only when the profile has lessons this device never touched`() {
+        val profile = ServerProfile(mastery = mapOf("local" to 0.5, "whatsapp-lesson" to 1.0))
+        assertTrue(profileHasRemoteActivity(profile, answeredLessonIds = setOf("local"), completed = emptySet()))
+        assertFalse(profileHasRemoteActivity(ServerProfile(mastery = mapOf("local" to 0.5)), setOf("local"), emptySet()))
+        assertFalse("a lesson completed here counts as local", profileHasRemoteActivity(ServerProfile(mastery = mapOf("l" to 1.0)), emptySet(), setOf("l")))
+        assertFalse(profileHasRemoteActivity(ServerProfile(), emptySet(), emptySet()))
+    }
+
+    @Test
+    fun `the profile note mentions WhatsApp only with evidence and flags waiting updates`() {
+        val onlyLocal = LessonsUiState(
+            profile = ServerProfile(mastery = mapOf("l1" to 0.5)),
+            answeredLessonIds = setOf("l1")
+        )
+        assertEquals("From the server, as of the last sync", profileSourceNote(onlyLocal))
+        assertFalse(profileSourceNote(onlyLocal).contains("WhatsApp"))
+
+        val withRemote = onlyLocal.copy(profile = ServerProfile(mastery = mapOf("l1" to 0.5, "w1" to 0.9)), pendingCount = 2)
+        val note = profileSourceNote(withRemote)
+        assertTrue(note.contains("such as on WhatsApp"))
+        assertTrue(note.contains("doesn't include your 2 waiting updates yet"))
+        assertEquals("", profileSourceNote(LessonsUiState(profile = null)))
+    }
+
+    @Test
+    fun `answered lesson ids reach the ui state from the progress store`() = runTest {
+        newVm(); net.online = false
+        openQuiz()
+        vm.answer("B")
+        assertEquals(setOf(lesson), vm.uiState.value.answeredLessonIds)
     }
 }

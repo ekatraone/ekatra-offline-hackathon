@@ -18,6 +18,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.ekatra.alfred.InferenceEngine
 import org.ekatra.alfred.persona.Persona
 import org.ekatra.alfred.tools.PromptFormatter
@@ -34,11 +35,15 @@ sealed interface LessonsScreen {
 /** State of the "Maya explains" panel under a wrong answer. */
 sealed interface ExplainState {
     data object Idle : ExplainState
-    data object Loading : ExplainState
-    data class Streaming(val text: String) : ExplainState
-    data class Done(val text: String) : ExplainState
-    /** The on-device model could not answer; [text] is the explanation that shipped with the lesson. */
-    data class Fallback(val text: String) : ExplainState
+    /** [modelName] is the model that is actually answering, shown to the learner. */
+    data class Loading(val modelName: String) : ExplainState
+    data class Streaming(val text: String, val modelName: String) : ExplainState
+    data class Done(val text: String, val modelName: String) : ExplainState
+    /**
+     * The on-device model did not answer; [text] is the explanation that shipped with the lesson and
+     * [reason] says why, so the UI never pretends the model wrote it.
+     */
+    data class Fallback(val text: String, val reason: String) : ExplainState
 }
 
 data class QuizState(
@@ -61,6 +66,8 @@ data class LessonsUiState(
     val notice: String? = null,
     val profile: ServerProfile? = null,
     val lessonTitles: Map<String, String> = emptyMap(),
+    /** Lessons this learner has answered a question in on this device. */
+    val answeredLessonIds: Set<String> = emptySet(),
     val screen: LessonsScreen = LessonsScreen.Home,
     val quiz: QuizState = QuizState(),
     val explain: ExplainState = ExplainState.Idle
@@ -86,14 +93,19 @@ class LessonsViewModel @Inject constructor(
         const val LANGUAGE = "en"
         /** Module text handed to the on-device model; the context is only 2048 tokens. */
         const val LESSON_CONTEXT_CHARS = 1200
+        /** Chat keeps the persona's 120 s; a quiz explanation that takes longer than this is not worth waiting for. */
+        const val EXPLAIN_FIRST_TOKEN_MS = 25_000L
+        /** If chat or host mode is generating, wait this long for the shared inference Mutex, then fall back. */
+        const val EXPLAIN_MUTEX_WAIT_MS = 10_000L
     }
 
     private val formatter = PromptFormatter()
     private val _ui = MutableStateFlow(LessonsUiState(configured = manager.isConfigured))
     val uiState: StateFlow<LessonsUiState> = _ui.asStateFlow()
 
-    /** Test seam; production uses the persona's value. */
-    internal var firstTokenTimeoutMs: Long = persona.firstTokenTimeoutMs
+    /** Test seams. */
+    internal var firstTokenTimeoutMs: Long = EXPLAIN_FIRST_TOKEN_MS
+    internal var mutexWaitMs: Long = EXPLAIN_MUTEX_WAIT_MS
 
     /** Queue and progress files are written off the main thread. Tests swap it. */
     internal var ioDispatcher: CoroutineDispatcher = Dispatchers.IO
@@ -107,6 +119,7 @@ class LessonsViewModel @Inject constructor(
                 _ui.update {
                     it.copy(
                         completed = p.completedLessonIds,
+                        answeredLessonIds = p.answers.values.map { a -> a.lessonId }.toSet(),
                         profile = p.profile,
                         lessonTitles = p.me?.lessonTitles.orEmpty()
                     )
@@ -220,11 +233,12 @@ class LessonsViewModel @Inject constructor(
         val q = lesson.questions[index]
         val prev = progress.answerFor(q.id) ?: return QuizState(index, null, null, correctSoFar) to ExplainState.Idle
         val quiz = QuizState(index, prev.answer, prev.correct, correctSoFar + if (prev.correct) 1 else 0)
-        return quiz to if (prev.correct) ExplainState.Idle else fallbackFor(q)
+        return quiz to if (prev.correct) ExplainState.Idle else fallbackFor(q, "you answered this earlier")
     }
 
-    private fun fallbackFor(q: BundleQuestion) = ExplainState.Fallback(
-        q.explanation?.takeIf { it.isNotBlank() } ?: "The correct answer is ${q.correctAnswer}."
+    private fun fallbackFor(q: BundleQuestion, reason: String) = ExplainState.Fallback(
+        q.explanation?.takeIf { it.isNotBlank() } ?: "The correct answer is ${q.correctAnswer}.",
+        reason
     )
 
     /** Grade locally, queue the event, record it, and ask Maya to explain a miss. */
@@ -288,10 +302,9 @@ class LessonsViewModel @Inject constructor(
 
     private fun explainWrongAnswer(lesson: BundleLesson, question: BundleQuestion, chosen: String) {
         explainJob?.cancel()
-        val fallback = fallbackFor(question)
         val model = locator.locate()
         if (model == null) {
-            _ui.update { it.copy(explain = fallback) }
+            _ui.update { it.copy(explain = fallbackFor(question, "Maya's on-device model isn't downloaded")) }
             return
         }
         val prompt = buildExplainPrompt(model.id, lesson, question, chosen)
@@ -299,42 +312,52 @@ class LessonsViewModel @Inject constructor(
         var timedOut = false
 
         explainJob = viewModelScope.launch {
-            _ui.update { it.copy(explain = ExplainState.Loading) }
+            _ui.update { it.copy(explain = ExplainState.Loading(model.name)) }
+
+            // Chat and host mode share this Mutex. Wait a little for it, not for a whole reply.
+            val gotLock = withTimeoutOrNull(mutexWaitMs) { inferenceMutex.lock(); true } ?: false
+            if (!gotLock) {
+                Log.w(TAG, "Inference busy; showing the lesson's explanation")
+                _ui.update { it.copy(explain = fallbackFor(question, "Maya was busy with another answer")) }
+                return@launch
+            }
             try {
-                // One inference at a time: chat and the host server share this mutex.
-                inferenceMutex.withLock {
-                    check(engine.loadModel(model.file)) { "Model failed to load" } // no-op if already loaded
-                    val genJob = currentCoroutineContext()[Job]
-                    val watchdog = launch {
-                        delay(firstTokenTimeoutMs)
-                        if (out.isEmpty()) {
-                            Log.w(TAG, "First-token timeout, cancelling explanation")
-                            timedOut = true
-                            genJob?.cancel(CancellationException("First token timeout"))
-                        }
+                check(engine.loadModel(model.file)) { "Model failed to load" } // no-op if already loaded
+                val genJob = currentCoroutineContext()[Job]
+                val watchdog = launch {
+                    delay(firstTokenTimeoutMs)
+                    if (out.isEmpty()) {
+                        Log.w(TAG, "First-token timeout, cancelling explanation")
+                        timedOut = true
+                        genJob?.cancel(CancellationException("First token timeout"))
                     }
-                    try {
-                        engine.generateRaw(prompt).collect { token ->
-                            if (out.isEmpty()) watchdog.cancel()
-                            out.append(token)
-                            _ui.update { it.copy(explain = ExplainState.Streaming(out.toString())) }
-                        }
-                    } finally {
-                        watchdog.cancel()
+                }
+                try {
+                    engine.generateRaw(prompt).collect { token ->
+                        if (out.isEmpty()) watchdog.cancel()
+                        out.append(token)
+                        _ui.update { it.copy(explain = ExplainState.Streaming(out.toString(), model.name)) }
                     }
+                } finally {
+                    watchdog.cancel()
                 }
             } catch (e: CancellationException) {
                 if (timedOut && out.isEmpty()) {
-                    _ui.update { it.copy(explain = fallback) }
+                    _ui.update { it.copy(explain = fallbackFor(question, "Maya took too long to answer")) }
                     return@launch
                 }
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Explanation failed", e)
                 out.clear()
+            } finally {
+                inferenceMutex.unlock()
             }
             val text = out.toString().trim()
-            _ui.update { it.copy(explain = if (text.isNotBlank()) ExplainState.Done(text) else fallback) }
+            _ui.update {
+                it.copy(explain = if (text.isNotBlank()) ExplainState.Done(text, model.name)
+                else fallbackFor(question, "Maya couldn't answer this time"))
+            }
         }
     }
 

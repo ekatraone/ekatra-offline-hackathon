@@ -11,7 +11,8 @@ import org.ekatra.alfred.data.sync.SyncWorker
 import java.io.File
 import javax.inject.Inject
 
-data class LocatedModel(val id: String, val file: File)
+/** [name] is the model's display name, e.g. "Llama 3.2 1B Instruct", shown to the learner. */
+data class LocatedModel(val id: String, val file: File, val name: String = id)
 
 /** Finds the on-device model the chat already downloaded. Null when none is on disk. */
 interface ModelLocator {
@@ -25,9 +26,9 @@ class AppModelLocator @Inject constructor(
     override fun locate(): LocatedModel? {
         val selected = settings.getSelectedModel()
         val direct = File(context.filesDir, "models/${selected.filename}")
-        if (direct.exists()) return LocatedModel(selected.id, direct)
+        if (direct.exists()) return LocatedModel(selected.id, direct, selected.name)
         val recovered = settings.recoverDownloadedModel(context) ?: return null
-        return LocatedModel(recovered.id, File(context.filesDir, "models/${recovered.filename}"))
+        return LocatedModel(recovered.id, File(context.filesDir, "models/${recovered.filename}"), recovered.name)
     }
 }
 

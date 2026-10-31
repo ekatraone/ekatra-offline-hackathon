@@ -288,6 +288,15 @@ private fun QuizScreen(ui: LessonsUiState, lesson: BundleLesson, vm: LessonsView
     }
 }
 
+/** The line under "Maya explains" that names what actually wrote the text. */
+internal fun explainCredit(state: ExplainState): String? = when (state) {
+    is ExplainState.Loading -> "${state.modelName} is thinking on this phone…"
+    is ExplainState.Streaming -> "Explained by ${state.modelName} on this phone"
+    is ExplainState.Done -> "Explained by ${state.modelName} on this phone"
+    is ExplainState.Fallback -> "From the lesson, not written by the model (${state.reason})"
+    ExplainState.Idle -> null
+}
+
 @Composable
 private fun MayaExplains(state: ExplainState) {
     if (state is ExplainState.Idle) return
@@ -295,23 +304,40 @@ private fun MayaExplains(state: ExplainState) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("Maya explains", fontWeight = FontWeight.Bold, color = Blue, fontSize = 14.sp)
             when (state) {
-                ExplainState.Loading -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                is ExplainState.Loading -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                     Text("Thinking…", fontSize = 14.sp)
                 }
                 is ExplainState.Streaming -> Text(state.text, fontSize = 15.sp)
                 is ExplainState.Done -> Text(state.text, fontSize = 15.sp)
-                is ExplainState.Fallback -> {
-                    Text(state.text, fontSize = 15.sp)
-                    Text("From the lesson (Maya's on-device model wasn't available).", fontSize = 11.sp, color = Color(0xFF64748B))
-                }
+                is ExplainState.Fallback -> Text(state.text, fontSize = 15.sp)
                 ExplainState.Idle -> Unit
             }
+            explainCredit(state)?.let { Text(it, fontSize = 11.sp, color = Color(0xFF64748B)) }
         }
     }
 }
 
 // ---------------- completion ----------------
+
+/**
+ * True only when the server profile has mastery for a lesson this device never saw an answer or a
+ * completion for, i.e. the learner worked on it somewhere else (WhatsApp, another phone).
+ */
+internal fun profileHasRemoteActivity(profile: ServerProfile, answeredLessonIds: Set<String>, completed: Set<String>): Boolean =
+    profile.mastery.keys.any { it !in answeredLessonIds && it !in completed }
+
+internal fun profileSourceNote(ui: LessonsUiState): String {
+    val profile = ui.profile ?: return ""
+    val base = "From the server, as of the last sync"
+    val waiting = if (ui.pendingCount > 0) {
+        " · doesn't include your ${ui.pendingCount} waiting update${if (ui.pendingCount == 1) "" else "s"} yet"
+    } else ""
+    val elsewhere = if (profileHasRemoteActivity(profile, ui.answeredLessonIds, ui.completed)) {
+        " · includes lessons you took elsewhere, such as on WhatsApp"
+    } else ""
+    return base + waiting + elsewhere
+}
 
 @Composable
 private fun DoneScreen(ui: LessonsUiState, lesson: BundleLesson, vm: LessonsViewModel) {
@@ -326,7 +352,7 @@ private fun DoneScreen(ui: LessonsUiState, lesson: BundleLesson, vm: LessonsView
         Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Your learning profile", fontWeight = FontWeight.Bold, fontSize = 16.sp, modifier = Modifier.weight(1f))
+                    Text("Last synced profile", fontWeight = FontWeight.Bold, fontSize = 16.sp, modifier = Modifier.weight(1f))
                     SyncChip(ui)
                 }
                 val profile = ui.profile
@@ -337,7 +363,7 @@ private fun DoneScreen(ui: LessonsUiState, lesson: BundleLesson, vm: LessonsView
                         fontSize = 14.sp, color = Color(0xFF475569)
                     )
                 } else {
-                    Text("From the server, including answers from WhatsApp", fontSize = 11.sp, color = Color(0xFF94A3B8))
+                    Text(profileSourceNote(ui), fontSize = 11.sp, color = Color(0xFF94A3B8))
                     Text(
                         "${profile.totals.quizAnswered} answered · ${profile.totals.correct} right · ${profile.totals.wrong} wrong · ${profile.totals.lessonsCompleted} lessons done",
                         fontSize = 14.sp

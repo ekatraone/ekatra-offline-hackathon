@@ -106,7 +106,7 @@ class FakeEngine : org.ekatra.alfred.InferenceEngine {
     override fun setSystemPrompt(prompt: String) {}
 }
 
-class FakeLocator(var model: LocatedModel? = LocatedModel("llama-3.2-1b-instruct", java.io.File("/models/llama.gguf"))) : ModelLocator {
+class FakeLocator(var model: LocatedModel? = LocatedModel("llama-3.2-1b-instruct", java.io.File("/models/llama.gguf"), "Llama 3.2 1B Instruct")) : ModelLocator {
     override fun locate() = model
 }
 
