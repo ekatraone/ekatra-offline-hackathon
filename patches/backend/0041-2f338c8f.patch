@@ -1,0 +1,182 @@
+diff --git a/apps/backend/src/flows/__tests__/conversationFSM.test.ts b/apps/backend/src/flows/__tests__/conversationFSM.test.ts
+index 2fba26a5..c0fe442b 100644
+--- a/apps/backend/src/flows/__tests__/conversationFSM.test.ts
++++ b/apps/backend/src/flows/__tests__/conversationFSM.test.ts
+@@ -261,7 +261,7 @@ test('doubt state: question reaches QA with original text and without competing
+ test('a Hindi topic is accepted as-is', async () => {
+   const h = setup({ fsm: { state: 'topic_input', data: { language: 'hi' }, version: 3 } });
+   await h.fsm.process(h.learner, text('शेयर मार्केट की बेसिक्स'));
+-  assert.equal(h.learner.metadata.fsm.state, 'goal_input');
++  assert.equal(h.learner.metadata.fsm.state, 'style_input');
+   assert.equal(h.learner.metadata.fsm.data.topic, 'शेयर मार्केट की बेसिक्स');
+ });
+ 
+@@ -275,11 +275,31 @@ test('typed हिंदी selects Hindi and typed आसान भाषा se
+   const h = setup({ fsm: { state: 'language_input', data: {}, version: 3 } });
+   await h.fsm.process(h.learner, text('हिंदी'));
+   assert.equal(h.learner.metadata.fsm.data.language, 'hi');
+-  await h.fsm.process(h.learner, text('आसान भाषा'));
+   assert.equal(h.learner.metadata.fsm.state, 'topic_input');
++  await h.fsm.process(h.learner, text('शेयर मार्केट की बेसिक्स'));
++  await h.fsm.process(h.learner, text('आसान भाषा'));
++  assert.equal(h.learner.metadata.fsm.state, 'goal_input');
+   assert.equal(h.learner.metadata.fsm.data.style, 'casual');
+ });
+ 
++test('every new course asks its style after the topic, and a stale style is not reused', async () => {
++  const h = setup({ fsm: { state: 'topic_input', data: { language: 'en', style: 'professional' }, version: 3 } });
++  await h.fsm.process(h.learner, text('Farming Eggs'));
++  assert.equal(h.learner.metadata.fsm.state, 'style_input');
++  assert.equal(h.learner.metadata.fsm.data.style, undefined);
++  await h.fsm.process(h.learner, text('style_practical'));
++  assert.equal(h.learner.metadata.fsm.state, 'goal_input');
++  assert.equal(h.learner.metadata.fsm.data.style, 'practical');
++  assert.equal(h.learner.metadata.fsm.data.topic, 'Farming Eggs');
++});
++
++test('a button id from an older message is not taken as a topic', async () => {
++  const h = setup({ fsm: { state: 'topic_input', data: { language: 'en' }, version: 3 } });
++  await h.fsm.process(h.learner, text('browse_courses'));
++  assert.equal(h.learner.metadata.fsm.state, 'topic_input');
++  assert.equal(h.learner.metadata.fsm.data.topic, undefined);
++});
++
+ // ── #14: restart / new topic / New Course ───────────────────────────────────
+ 
+ test('"new topic" with an active course drops it and asks for a topic', async () => {
+diff --git a/apps/backend/src/flows/conversationFSM.ts b/apps/backend/src/flows/conversationFSM.ts
+index b5a1f75b..fde9256c 100644
+--- a/apps/backend/src/flows/conversationFSM.ts
++++ b/apps/backend/src/flows/conversationFSM.ts
+@@ -376,13 +376,24 @@ export class ConversationFSM {
+     await db.learners.update(learner.id, { language: lang });
+     learner.language = lang;
+ 
+-    await this.transitionTo(learner, ctx, 'style_input', ctx.data);
++    await this.transitionTo(learner, ctx, 'topic_input', ctx.data);
+ 
+     const isHindi = lang === 'hi';
++    await messaging.sendText(learner.phone, {
++      text: isHindi
++        ? `बढ़िया! 🤩\n\nमैं *Alfred* हूँ — आपका AI टीचर, जो किसी भी विषय पर कोर्स बना सकता है।\n\nआप क्या सीखना चाहते हैं? (उदाहरण: "Python basics" या "शेयर मार्केट की बेसिक्स")`
++        : `That's amazing! 🤩\n\nI'm *Alfred*, your AI tutor — I can create a course on any topic you choose.\n\nWhat would you like to learn?\n\n_Example: "Python basics" or "Marketing fundamentals"_`,
++    });
++  }
++
++  /** Asks how the learner wants this course taught. Asked for every new course, after the topic. */
++  private async sendStylePrompt(learner: any, ctx: FSMContext): Promise<void> {
++    const messaging = await getMessaging();
++    const isHindi = ctx.data.language === 'hi';
+     await messaging.sendInteractiveButtons(learner.phone, {
+       body: isHindi
+-        ? `बढ़िया! 🤩\n\nमैं *Alfred* हूँ — आपका AI टीचर, जो किसी भी विषय पर कोर्स बना सकता है।\n\nआप किस तरह से सीखना पसंद करते हैं?`
+-        : `That's amazing! 🤩\n\nI'm *Alfred*, your AI tutor — I can create a course on any topic you choose.\n\nHow do you prefer to learn?`,
++        ? `अच्छा चुनाव! 📚 *${ctx.data.topic}*\n\nआप इसे किस तरह से सीखना पसंद करेंगे?`
++        : `Great choice! 📚 *${ctx.data.topic}*\n\nHow would you like this course taught?`,
+       buttons: [
+         { id: 'style_professional', title: isHindi ? 'औपचारिक' : 'Professional' },
+         { id: 'style_casual', title: isHindi ? 'आसान भाषा' : 'Casual' },
+@@ -391,6 +402,18 @@ export class ConversationFSM {
+     });
+   }
+ 
++  private async sendGoalPrompt(learner: any, ctx: FSMContext): Promise<void> {
++    const messaging = await getMessaging();
++    await messaging.sendInteractiveButtons(learner.phone, {
++      body: `Got it! What's your main goal with *${ctx.data.topic}*?`,
++      buttons: [
++        { id: 'goal_beginner', title: 'Complete beginner' },
++        { id: 'goal_refresh', title: 'Quick refresher' },
++        { id: 'goal_practical', title: 'Practical skills' },
++      ],
++    });
++  }
++
+   private async handleStyleInput(
+     learner: any,
+     ctx: FSMContext,
+@@ -424,6 +447,12 @@ export class ConversationFSM {
+     }
+ 
+     ctx.data.style = resolvedStyle;
++    if (ctx.data.topic) {
++      await this.transitionTo(learner, ctx, 'goal_input', ctx.data);
++      await this.sendGoalPrompt(learner, ctx);
++      return;
++    }
++    // A chat that was already past the language step when this changed still gets asked for a topic.
+     await this.transitionTo(learner, ctx, 'topic_input', ctx.data);
+ 
+     const isHindi = ctx.data.language === 'hi';
+@@ -443,7 +472,8 @@ export class ConversationFSM {
+ 
+     // `input` is cleaned free text (not the command-normalised form), so Hindi
+     // topics and "C++"/"C#" survive; reject only input with no letters/digits.
+-    if (!input || input.length < 2 || !normalizeCommand(input)) {
++    // A tap on a button from an older message arrives as its id (e.g. "browse_courses"): not a topic.
++    if (!input || input.length < 2 || !normalizeCommand(input) || /^[a-z0-9]+(_[a-z0-9]+)+$/.test(input)) {
+       await messaging.sendText(learner.phone, {
+         text: "Please type what you'd like to learn. For example: *Python basics*",
+       });
+@@ -452,16 +482,10 @@ export class ConversationFSM {
+ 
+     input = input.slice(0, 200);
+     ctx.data.topic = input;
+-    await this.transitionTo(learner, ctx, 'goal_input', ctx.data);
+-
+-    await messaging.sendInteractiveButtons(learner.phone, {
+-      body: `Great choice! 📚 *${input}*\n\nWhat's your main goal with this topic?`,
+-      buttons: [
+-        { id: 'goal_beginner', title: 'Complete beginner' },
+-        { id: 'goal_refresh', title: 'Quick refresher' },
+-        { id: 'goal_practical', title: 'Practical skills' },
+-      ],
+-    });
++    // Each new course asks its own style; a style from an earlier course is not carried over.
++    delete ctx.data.style;
++    await this.transitionTo(learner, ctx, 'style_input', ctx.data);
++    await this.sendStylePrompt(learner, ctx);
+   }
+ 
+   private async handleGoalInput(
+diff --git a/packages/messaging/src/index.ts b/packages/messaging/src/index.ts
+index dc6d4f2b..74e119b9 100644
+--- a/packages/messaging/src/index.ts
++++ b/packages/messaging/src/index.ts
+@@ -5,6 +5,8 @@
+  * Adapted from microlearn-main/src/services/whatsappService.ts
+  */
+ 
++import { createHash } from 'node:crypto';
++
+ // ── Pre-approved Twilio Content SIDs (work outside the 24hr session window) ──
+ export const TWILIO_TEMPLATES = {
+   daily_reminder:       'HX3097cf97f11eae20a76ee987c9bf0cff',  // vars: {1: name, 2: day, 3: course}
+@@ -504,6 +506,17 @@ class WATIProvider {
+ // Avoids creating a new template on every message (matches original WhatsApp project behaviour)
+ const _quickReplyCache = new Map<string, string>();
+ 
++/**
++ * Cache key for a quick-reply template: a hash of the FULL body plus every button's id and title.
++ * The template stores the body text, so any difference in it must miss the cache. (A body prefix
++ * used to be the key, which made every learning-plan card reuse the first one sent: stale topic,
++ * goal and style.)
++ */
++export function quickReplyCacheKey(message: { body: string; buttons: Array<{ id: string; title: string }> }): string {
++  const parts = [message.body, ...message.buttons.slice(0, 3).map((b) => `${b.id}\u0000${b.title}`)];
++  return 'qr2:' + createHash('sha256').update(parts.join('\u0001')).digest('hex');
++}
++
+ class TwilioProvider {
+   private accountSid: string;
+   private authToken: string;
+@@ -595,8 +608,7 @@ class TwilioProvider {
+         id: btn.id,
+       }));
+ 
+-      // Cache key: body prefix + sorted button titles (matches original ekatra-whatsapp caching)
+-      const cacheKey = message.body.substring(0, 40) + '|' + message.buttons.map(b => b.title).sort().join('|');
++      const cacheKey = quickReplyCacheKey(message);
+       let sid = _quickReplyCache.get(cacheKey);
+ 
+       if (!sid) {
