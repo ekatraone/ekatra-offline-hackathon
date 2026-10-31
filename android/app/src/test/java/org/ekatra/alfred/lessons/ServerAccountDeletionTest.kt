@@ -521,6 +521,23 @@ class ServerAccountDeletionTest {
     }
 
     @Test
+    fun `auth_unavailable means a broken Firebase key, so learners may exist and the deletion is blocked`() = runBlocking {
+        startServer()
+        status = 503; bodyOverride = """{"success":false,"error":"auth_unavailable"}"""
+
+        assertTrue(client().deleteAccountByIdToken("t") is DeleteOutcome.Failed)
+
+        // ...and through the erase logic, the deletion does not go ahead.
+        val fb = FakeFirebase(user = true, currentUid = "uid-1", idTokens = mutableListOf("id-token"))
+        val erase = ServerAccountDeletion(client(), SyncConfig("http://127.0.0.1:${server.localPort}/", "", FakeTokenStore()), FakeConnectivity(true), fb, lessonsEnabled = true)
+        assertFalse(erase.eraseLearner())
+
+        // The two codes are told apart: the same call with auth_not_configured proceeds.
+        bodyOverride = notConfigured
+        assertTrue(erase.eraseLearner())
+    }
+
+    @Test
     fun `that code on any status but 503 does not count`() = runBlocking {
         startServer()
         bodyOverride = notConfigured
