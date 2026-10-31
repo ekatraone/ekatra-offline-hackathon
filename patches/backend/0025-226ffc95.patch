@@ -1,0 +1,55 @@
+diff --git a/apps/backend/src/services/scheduler.ts b/apps/backend/src/services/scheduler.ts
+index 9fd46950..1afcf398 100644
+--- a/apps/backend/src/services/scheduler.ts
++++ b/apps/backend/src/services/scheduler.ts
+@@ -188,6 +188,7 @@ export class SchedulerService {
+       const db = await getDb();
+       const messaging = await getMessaging();
+       const TEMPLATES = await getTemplates();
++      const { isAppOnlyRecipient } = await import('@ekatra/messaging');
+ 
+       // Find all active learners
+       const { data: learners } = await db.learners.findAll({ status: 'active', limit: 500 });
+@@ -199,6 +200,8 @@ export class SchedulerService {
+       const redis = getRedis();
+ 
+       for (const learner of learners) {
++        // App-only learners ("fb:<uid>") have no WhatsApp/Telegram channel to remind.
++        if (isAppOnlyRecipient(learner.phone)) continue;
+         // Per-learner dedup: Redis-backed when available, in-memory fallback
+         const perLearnerKey = `reminded:${today}:${learner.id}`;
+         if (redis) {
+diff --git a/packages/messaging/src/index.ts b/packages/messaging/src/index.ts
+index b43fe8a0..e5f31088 100644
+--- a/packages/messaging/src/index.ts
++++ b/packages/messaging/src/index.ts
+@@ -975,8 +975,21 @@ export function absoluteMediaUrl(stored: unknown, env: Record<string, string | u
+   return base ? `${base}${stored}` : null;
+ }
+ 
++/**
++ * Learners who signed in only through the app (Google/email via Firebase) are addressed
++ * "fb:<uid>". They have no messaging channel: nothing may be sent to them, and above all not
++ * to a phone number derived from the uid (the Twilio formatter would strip it to digits).
++ */
++export function isAppOnlyRecipient(to: string): boolean {
++  return to.startsWith('fb:');
++}
++
++const NO_CHANNEL: SendResult = { success: false, error: 'recipient has no messaging channel (app-only learner)' };
++const appOnlyProvider = new Proxy({}, { get: () => async () => NO_CHANNEL }) as unknown as MockProvider;
++
+ function providerFor(to: string): CloudAPIProvider | WATIProvider | TwilioProvider | MockProvider | TelegramProvider {
+   if (!messagingInstance) throw new Error('Messaging not initialized');
++  if (isAppOnlyRecipient(to)) return appOnlyProvider;
+   if (isTelegramRecipient(to)) {
+     if (!telegramInstance) throw new Error('Telegram not initialized — set TELEGRAM_BOT_TOKEN');
+     return telegramInstance;
+@@ -1079,6 +1092,7 @@ export const messaging = {
+    */
+   async sendTemplate(to: string, sid: string, vars: Record<string, string> = {}): Promise<SendResult> {
+     if (!messagingInstance) throw new Error('Messaging not initialized');
++    if (isAppOnlyRecipient(to)) return NO_CHANNEL;
+     let result: SendResult;
+     if (messagingInstance instanceof TwilioProvider) {
+       result = await messagingInstance.sendTemplate(to, sid, vars);
