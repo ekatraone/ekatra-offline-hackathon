@@ -1,0 +1,106 @@
+diff --git a/apps/backend/src/flows/conversationFSM.ts b/apps/backend/src/flows/conversationFSM.ts
+index 68ea8965..b5a1f75b 100644
+--- a/apps/backend/src/flows/conversationFSM.ts
++++ b/apps/backend/src/flows/conversationFSM.ts
+@@ -136,6 +136,21 @@ interface IncomingMessage {
+ 
+ // ── FSM core ───────────────────────────────────────────────────────────────
+ 
++/**
++ * What a learner's chat request asks the course generator for. The learner id is stamped on the
++ * course (requestedByLearnerId) so deleting their account can tell their own courses from admin ones.
++ */
++export function courseRequestFor(learner: any, data: FSMData, defaultOrganizationId?: string) {
++  return {
++    topic: data.topic!,
++    goal: data.goal,
++    language: data.language || learner.language || 'en',
++    style: data.style || 'casual',
++    organizationId: defaultOrganizationId || learner.organization_id,
++    requestedByLearnerId: learner.id as string,
++  };
++}
++
+ export class ConversationFSM {
+   private courseDelivery: any = null;
+   private qaService: any = null;
+@@ -1007,13 +1022,7 @@ export class ConversationFSM {
+       const generator = await this.getGeneratorService();
+       const org = await db.organizations.getDefault();
+ 
+-      const course = await generator.generate({
+-        topic: data.topic!,
+-        goal: data.goal,
+-        language: data.language || learner.language || 'en',
+-        style: data.style || 'casual',
+-        organizationId: org?.id || learner.organization_id,
+-      });
++      const course = await generator.generate(courseRequestFor(learner, data, org?.id));
+ 
+       // Enroll the learner
+       const lessons = await db.lessons.findByCourse(course.id);
+diff --git a/apps/backend/src/services/courseGenerator.ts b/apps/backend/src/services/courseGenerator.ts
+index 7637dcea..1a74e99c 100644
+--- a/apps/backend/src/services/courseGenerator.ts
++++ b/apps/backend/src/services/courseGenerator.ts
+@@ -22,6 +22,11 @@ export interface CourseGenerationParams {
+   numDays?: number;    // default 3, max 5
+   numModules?: number; // modules per day, default 3, max 5
+   organizationId: string;
++  /**
++   * Set when the course is generated FOR a learner (the sync lesson request, the WhatsApp chat flow).
++   * Admin or API generation leaves it unset. Account deletion removes only courses carrying this stamp.
++   */
++  requestedByLearnerId?: string;
+   /** 'micro' = 1 day × 3 short modules; defaults to COURSE_SIZE env or 'standard'. */
+   size?: 'micro' | 'standard';
+   /** Force a provider (e.g. 'meta' for Muse) instead of the llmChat fallback chain. */
+@@ -71,12 +76,14 @@ export function buildCourseSettings(
+   language: string,
+   size: CourseSize,
+   provider?: 'meta',
++  requestedByLearnerId?: string,
+ ) {
+   return {
+     language,
+     aiGenerated: true,
+     totalDays: courseData.days.length,
+     size,
++    ...(requestedByLearnerId ? { requestedByLearnerId } : {}),
+     ...(courseData.generator
+       ? { generator: courseData.generator }
+       : provider === 'meta'
+@@ -131,6 +138,7 @@ export class CourseGeneratorService {
+       organizationId,
+       provider,
+       force = false,
++      requestedByLearnerId,
+     } = params;
+     const size = resolveCourseSize(params.size);
+     // The 3-minimum clamp applies only to standard courses.
+@@ -150,7 +158,7 @@ export class CourseGeneratorService {
+     logger.info(`🎓 Generating ${size} course: "${topic}" (${numDays} days × ${numModules} modules, lang=${language})`);
+ 
+     const courseData = await this.callLLM(topic, goal, language, style, numDays, numModules, size, provider);
+-    const course = await this.saveToDB(courseData, organizationId, language, size, provider, started);
++    const course = await this.saveToDB(courseData, organizationId, language, size, provider, started, requestedByLearnerId);
+ 
+     logger.info(`✅ Course saved: ${course.id} — "${course.title}"`);
+     return course;
+@@ -310,6 +318,7 @@ Ensure comprehensionQuestions has exactly ${reviewCount} items per day.`;
+     size: CourseSize,
+     provider?: 'meta',
+     startedAt: number = Date.now(),
++    requestedByLearnerId?: string,
+   ): Promise<any> {
+     const db = await getDb();
+ 
+@@ -319,7 +328,7 @@ Ensure comprehensionQuestions has exactly ${reviewCount} items per day.`;
+       title: courseData.title,
+       description: courseData.description,
+       status: 'published',
+-      settings: buildCourseSettings(courseData, language, size, provider),
++      settings: buildCourseSettings(courseData, language, size, provider, requestedByLearnerId),
+     });
+ 
+     // 2. Flatten days → modules, save each as a lesson row with day_number

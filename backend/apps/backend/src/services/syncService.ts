@@ -29,6 +29,7 @@ export interface CourseGeneratorLike {
     topic: string;
     language?: string;
     organizationId: string;
+    requestedByLearnerId?: string;
     size?: 'micro' | 'standard';
     provider?: 'meta';
     force?: boolean;
@@ -206,6 +207,7 @@ export async function requestLesson(
       topic,
       language,
       organizationId: learner.organizationId,
+      requestedByLearnerId: learner.id,
       size: 'micro',
       provider: 'meta',
       force: true,

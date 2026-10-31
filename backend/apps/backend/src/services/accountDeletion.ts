@@ -7,9 +7,12 @@
  *    flashcard_progress and sync_lesson_requests.
  *  - message_log and failed_messages only SET NULL, so they are deleted explicitly, as are the sign-in
  *    codes and ledger rows for the number.
- *  - AI-generated courses that only this learner was enrolled in are deleted too (their lessons,
- *    questions and images cascade); shared and authored courses stay. Every CTE reads the same
- *    pre-delete snapshot, so the "only this learner" test is not fooled by the enrollment cascade.
+ *  - Courses generated FOR this learner (settings.requestedByLearnerId, or, for courses made before that
+ *    stamp existed, linked through their sync_lesson_requests) are deleted when no other learner is
+ *    enrolled; their lessons, questions and images cascade. Authored and FSM-linked courses always stay,
+ *    and so does anything not generated for this learner (an admin-generated AI course with a single
+ *    enrolled learner is not theirs). Every CTE reads the same pre-delete snapshot, so the "no other
+ *    learner" test is not fooled by the enrollment cascade.
  */
 
 import type { IdentityDb } from './learnerIdentity.js';
@@ -22,8 +25,8 @@ export const DELETE_ACCOUNT_SQL = `WITH l AS (
          ), orphaned AS (
            SELECT c.id FROM courses c
            WHERE c.source <> 'authored' AND c.fsm_definition_id IS NULL
-             AND (c.settings->>'aiGenerated' = 'true' OR c.settings->'generator' IS NOT NULL)
-             AND EXISTS (SELECT 1 FROM enrollments e WHERE e.course_id = c.id AND e.learner_id IN (SELECT id FROM l))
+             AND (c.settings->>'requestedByLearnerId' = (SELECT id::text FROM l)
+                  OR c.id IN (SELECT course_id FROM sync_lesson_requests WHERE learner_id IN (SELECT id FROM l) AND course_id IS NOT NULL))
              AND NOT EXISTS (SELECT 1 FROM enrollments e WHERE e.course_id = c.id AND e.learner_id NOT IN (SELECT id FROM l))
          ), otp AS (
            DELETE FROM otp_challenges WHERE phone IN (SELECT p FROM numbers) RETURNING 1

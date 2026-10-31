@@ -13,6 +13,7 @@ export interface FakeChallenge {
 export interface FakeEvent { id?: number; phone: string; kind: 'start' | 'wrong' | 'lock'; at: number }
 export interface FakeCourse { id: string; title: string; source: string; fsm_definition_id: string | null; settings: Record<string, any> }
 export interface FakeEnrollment { learner_id: string; course_id: string }
+export interface FakeSyncRequest { learner_id: string; course_id: string | null }
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -26,6 +27,7 @@ export function makeAuthDb(seed: Partial<FakeLearner>[] = [], clock: () => numbe
   const events: FakeEvent[] = [];
   const courses: FakeCourse[] = [];
   const enrollments: FakeEnrollment[] = [];
+  const syncRequests: FakeSyncRequest[] = [];
   const recent = (e: FakeEvent) => clock() - e.at < DAY;
   // The latest lock lasts 1 h, or 24 h once there are two locks in the last 24 h.
   const lockedNow = (phone: string) => {
@@ -35,7 +37,7 @@ export function makeAuthDb(seed: Partial<FakeLearner>[] = [], clock: () => numbe
   };
 
   return {
-    learners, challenges, events, courses, enrollments,
+    learners, challenges, events, courses, enrollments, syncRequests,
     async raw(sql: string, p: any[] = []): Promise<{ rows: any[]; rowCount?: number }> {
       const has = (s: string) => sql.includes(s);
       if (has('FROM organizations')) return { rows: [{ id: ORG }] };
@@ -139,12 +141,12 @@ export function makeAuthDb(seed: Partial<FakeLearner>[] = [], clock: () => numbe
         if (idx < 0) return { rows: [{ deleted: 0 }] };
         const { phone } = learners[idx];
         const id = learners[idx].id;
-        // AI-generated, non-authored courses this learner was enrolled in and nobody else is
+        // Courses generated FOR this learner (stamp, or linked via their sync requests) that nobody else is enrolled in
         const orphaned = courses.filter((c) =>
           c.source !== 'authored' && !c.fsm_definition_id &&
-          (c.settings.aiGenerated === true || c.settings.generator != null) &&
-          enrollments.some((e) => e.course_id === c.id && e.learner_id === id) &&
+          (c.settings.requestedByLearnerId === id || syncRequests.some((r) => r.learner_id === id && r.course_id === c.id)) &&
           !enrollments.some((e) => e.course_id === c.id && e.learner_id !== id)).map((c) => c.id);
+        for (let i = syncRequests.length - 1; i >= 0; i--) if (syncRequests[i].learner_id === id) syncRequests.splice(i, 1);
         for (const cid of orphaned) {
           courses.splice(courses.findIndex((c) => c.id === cid), 1);
         }

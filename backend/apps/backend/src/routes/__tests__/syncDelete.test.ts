@@ -95,29 +95,43 @@ test('delete: runs as ONE statement, so it is all-or-nothing', async () => {
   }
 });
 
-test('delete: also removes AI-generated courses only this learner was in; shared and authored courses stay', async () => {
+test('delete: removes courses generated FOR this learner that nobody else took; everything else stays', async () => {
   const { db, base, as } = await startApp([
     { phone: '919876543210', whatsapp_id: '919876543210', name: 'Asha' },
     { phone: '919000000001', whatsapp_id: '919000000001', name: 'Other' },
   ]);
   const [asha, other] = db.learners;
-  const course = (id: string, over: object = {}) => ({ id, title: id, source: 'ai_generated', fsm_definition_id: null, settings: { aiGenerated: true }, ...over });
+  const course = (id: string, settings: object = {}, over: object = {}) =>
+    ({ id, title: id, source: 'ai_generated', fsm_definition_id: null, settings: { aiGenerated: true, ...settings }, ...over });
   db.courses.push(
-    course('solo-ai'),
-    course('solo-generator', { settings: { generator: { provider: 'meta', model: 'm' } } }),
-    course('shared-ai'),
-    course('authored', { source: 'authored' }),
-    course('fsm-linked', { fsm_definition_id: 'f1' }),
-    course('manual', { settings: {} }),
-    course('others-only'),
+    course('admin-ai'),                                                        // admin-generated, Asha is its only learner
+    course('admin-generator', { generator: { provider: 'meta', model: 'm' } }),  // same, stamped with a generator
+    course('requested-solo', { requestedByLearnerId: asha.id }),               // generated for Asha, only she took it
+    course('requested-shared', { requestedByLearnerId: asha.id }),             // generated for Asha, Other took it too
+    course('requested-by-other', { requestedByLearnerId: other.id }),          // generated for Other; Asha joined it
+    course('requested-authored', { requestedByLearnerId: asha.id }, { source: 'authored' }),
+    course('requested-fsm', { requestedByLearnerId: asha.id }, { fsm_definition_id: 'f1' }),
+    course('requested-nobody-enrolled', { requestedByLearnerId: asha.id }),    // stamped, no enrollment left
+    course('legacy-linked'),                                                   // made before the stamp existed
   );
-  for (const id of ['solo-ai', 'solo-generator', 'shared-ai', 'authored', 'fsm-linked', 'manual']) db.enrollments.push({ learner_id: asha.id, course_id: id });
-  db.enrollments.push({ learner_id: other.id, course_id: 'shared-ai' }, { learner_id: other.id, course_id: 'others-only' });
+  for (const id of ['admin-ai', 'admin-generator', 'requested-solo', 'requested-shared', 'requested-by-other',
+    'requested-authored', 'requested-fsm', 'legacy-linked']) db.enrollments.push({ learner_id: asha.id, course_id: id });
+  db.enrollments.push({ learner_id: other.id, course_id: 'requested-shared' }, { learner_id: other.id, course_id: 'requested-by-other' });
+  db.syncRequests.push({ learner_id: asha.id, course_id: 'legacy-linked' });
 
   assert.equal((await fetch(`${base}/me`, { method: 'DELETE', headers: as(tokenFor(asha)) })).status, 200);
-  assert.deepEqual(db.courses.map((c) => c.id).sort(), ['authored', 'fsm-linked', 'manual', 'others-only', 'shared-ai']);
+  assert.deepEqual(db.courses.map((c) => c.id).sort(),
+    ['admin-ai', 'admin-generator', 'requested-authored', 'requested-by-other', 'requested-fsm', 'requested-shared']);
   assert.deepEqual(db.enrollments.map((e) => `${e.learner_id === other.id ? 'other' : 'asha'}:${e.course_id}`).sort(),
-    ['other:others-only', 'other:shared-ai']);
+    ['other:requested-by-other', 'other:requested-shared']);
+});
+
+test('delete: an admin-generated AI course with a single enrolled learner survives that learner\'s deletion', async () => {
+  const { db, base, as } = await startApp([{ phone: '919876543210', name: 'Asha' }]);
+  db.courses.push({ id: 'admin-course', title: 'Admin course', source: 'ai_generated', fsm_definition_id: null, settings: { aiGenerated: true, generator: { provider: 'meta', model: 'm' } } });
+  db.enrollments.push({ learner_id: db.learners[0].id, course_id: 'admin-course' });
+  assert.equal((await fetch(`${base}/me`, { method: 'DELETE', headers: as(tokenFor(db.learners[0])) })).status, 200);
+  assert.deepEqual(db.courses.map((c) => c.id), ['admin-course']);
 });
 
 test('delete: the orphaned-course cleanup is part of the same single statement', async () => {
@@ -128,7 +142,8 @@ test('delete: the orphaned-course cleanup is part of the same single statement',
   await fetch(`${base}/me`, { method: 'DELETE', headers: as(tokenFor(db.learners[0])) });
   assert.equal(statements.length, 1);
   assert.match(statements[0], /DELETE FROM learners/, 'courses and learner are deleted by the one statement');
-  assert.match(statements[0], /aiGenerated/);
+  assert.match(statements[0], /requestedByLearnerId/);
+  assert.doesNotMatch(statements[0], /aiGenerated/, 'ownership, not the AI flag, decides what is deleted');
   assert.match(statements[0], /source <> 'authored'/);
 });
 
@@ -152,7 +167,7 @@ test('auth/account: a WhatsApp (wa:) user is deleted, and the response says so',
 
 test('auth/account: a Google/email (fb:) user is deleted, with their sole AI course', async () => {
   const { db, deleteAccount } = await startApp([{ phone: 'fb:AbC123', name: 'Mira', email: 'mira@example.com' }]);
-  db.courses.push({ id: 'mine', title: 'mine', source: 'ai_generated', fsm_definition_id: null, settings: { aiGenerated: true } });
+  db.courses.push({ id: 'mine', title: 'mine', source: 'ai_generated', fsm_definition_id: null, settings: { aiGenerated: true, requestedByLearnerId: db.learners[0].id } });
   db.enrollments.push({ learner_id: db.learners[0].id, course_id: 'mine' });
   const body: any = await (await deleteAccount({ uid: 'AbC123', ...google })).json();
   assert.equal(body.deleted, true);
