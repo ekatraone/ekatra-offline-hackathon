@@ -2,11 +2,14 @@ package org.ekatra.alfred.lessons
 
 import android.util.Log
 import com.google.gson.Gson
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import org.ekatra.alfred.data.local.SyncQueueDao
 import org.ekatra.alfred.data.model.SyncQueueItem
 import java.text.SimpleDateFormat
@@ -53,6 +56,8 @@ class LearnerSyncManager @Inject constructor(
         private const val MAX_REQUESTS_PER_RUN = 10
         /** Same give-up point as the analytics SyncManager. */
         const val MAX_RETRIES = 5
+        /** Lesson-request statuses that mean the request itself is bad; everything else is retried. */
+        private val DROP_REQUEST_CODES = setOf(400, 422)
         private const val MAX_BUNDLE_FETCHES = 5
 
         fun nowIso(millis: Long = System.currentTimeMillis()): String =
@@ -63,6 +68,9 @@ class LearnerSyncManager @Inject constructor(
 
     private val gson = Gson()
     private val runLock = Mutex()
+
+    /** Bundle and progress files are written during a pass, so a pass never runs on Main. Tests swap it. */
+    internal var ioDispatcher: CoroutineDispatcher = Dispatchers.IO
     private val _status = MutableStateFlow(if (config.isConfigured) SyncStatus.IDLE else SyncStatus.NOT_CONFIGURED)
     val status: StateFlow<SyncStatus> = _status
 
@@ -78,7 +86,7 @@ class LearnerSyncManager @Inject constructor(
 
     suspend fun enqueueQuizAnswer(courseId: String, lessonId: String, questionId: String, answer: String, correct: Boolean) {
         enqueueEvent(LearnerEvent(
-            clientEventId = UUID.randomUUID().toString(),
+            clientEventId = eventId("quiz", courseId, lessonId, questionId),
             type = LearnerEvent.QUIZ_ANSWERED,
             courseId = courseId, lessonId = lessonId, questionId = questionId,
             answer = answer, clientCorrect = correct, occurredAt = nowIso()
@@ -87,11 +95,19 @@ class LearnerSyncManager @Inject constructor(
 
     suspend fun enqueueLessonCompleted(courseId: String, lessonId: String) {
         enqueueEvent(LearnerEvent(
-            clientEventId = UUID.randomUUID().toString(),
+            clientEventId = eventId("done", courseId, lessonId),
             type = LearnerEvent.LESSON_COMPLETED,
             courseId = courseId, lessonId = lessonId, occurredAt = nowIso()
         ))
     }
+
+    /**
+     * One id per question (and per lesson completion), not per tap. If the app dies between writing
+     * the queue row and the progress file, the learner answers again and re-queues the same id, which
+     * the server counts as a duplicate instead of a second answer.
+     */
+    private fun eventId(vararg parts: String): String =
+        UUID.nameUUIDFromBytes(parts.joinToString("|").toByteArray(Charsets.UTF_8)).toString()
 
     private suspend fun enqueueEvent(event: LearnerEvent) {
         queue.insert(SyncQueueItem(type = TYPE_LEARNER_EVENT, payload = gson.toJson(event)))
@@ -115,7 +131,7 @@ class LearnerSyncManager @Inject constructor(
         // queue would otherwise wait for the next trigger. Passes never overlap.
         return runLock.withLock {
             _status.value = SyncStatus.RUNNING
-            val report = runPass()
+            val report = withContext(ioDispatcher) { runPass() }
             _status.value = report.status
             report
         }
@@ -128,19 +144,27 @@ class LearnerSyncManager @Inject constructor(
         var error: String? = null
         val requestErrors = mutableListOf<String>()
 
-        // 1. Lesson requests first, so the bundle exists before its events are posted.
+        // 1. Lesson requests first, so the bundle exists before its events are posted. One failing
+        // request never stops the others: keep going.
         for (item in queue.getPendingByType(TYPE_LESSON_REQUEST, MAX_REQUESTS_PER_RUN)) {
             val req = parseRequest(item)
             if (req == null) { queue.delete(item); dropped++; continue }
             when (val r = api.requestLesson(req.topic, req.language, req.clientRequestId)) {
                 is ApiResult.Ok -> { bundles.save(r.value.bundle); queue.delete(item); downloaded++ }
                 is ApiResult.Unauthorized -> return SyncReport(SyncStatus.UNAUTHORIZED, downloaded, resolved, dropped, r.message, requestErrors)
-                is ApiResult.Retryable -> { queue.incrementRetry(item.id); error = r.message; break }
+                is ApiResult.Retryable -> { retryRequest(item); error = r.message }
                 is ApiResult.Rejected -> {
-                    // A 4xx on a lesson request (e.g. topic validation) will never succeed: drop it,
-                    // but tell the learner why.
-                    Log.w(TAG, "Lesson request rejected (${r.code}): ${r.message}")
-                    queue.delete(item); dropped++; requestErrors += r.message; error = r.message
+                    if (r.code in DROP_REQUEST_CODES) {
+                        // Only 400/422 mean the topic itself is unacceptable. Tell the learner why.
+                        Log.w(TAG, "Lesson request dropped (${r.code}): ${r.message}")
+                        queue.delete(item); dropped++; requestErrors += r.message
+                    } else {
+                        // 404/408/409/413 and anything else can come from a redeploying service or a
+                        // proxy, or from the server still generating this same id (409 in_progress).
+                        Log.w(TAG, "Lesson request will be retried (${r.code}): ${r.message}")
+                        retryRequest(item)
+                    }
+                    error = r.message
                 }
             }
         }
@@ -166,16 +190,12 @@ class LearnerSyncManager @Inject constructor(
                 }
                 is ApiResult.Unauthorized -> return SyncReport(SyncStatus.UNAUTHORIZED, downloaded, resolved, dropped, r.message, requestErrors)
                 is ApiResult.Retryable -> { valid.forEach { queue.incrementRetry(it.first.id) }; error = r.message; break }
-                // Per-event rejections arrive inside a 200 (data.rejected). A whole-request 4xx means
-                // the request was wrong (client bug, version skew, unenrolled course), not the events,
-                // so never delete progress for it: keep the rows, count a retry, and give up only
-                // after MAX_RETRIES.
+                // Per-event rejections arrive inside a 200 (data.rejected). Any whole-request error
+                // other than 401 means the request was wrong, not the events: keep every row, count a
+                // retry and log it. Rows are only ever deleted per event, from inside a 200.
                 is ApiResult.Rejected -> {
                     Log.w(TAG, "Events batch rejected (${r.code}): ${r.message}")
-                    for ((item, _) in valid) {
-                        if (item.retryCount >= MAX_RETRIES) { queue.delete(item); dropped++ }
-                        else queue.incrementRetry(item.id)
-                    }
+                    valid.forEach { queue.incrementRetry(it.first.id) }
                     error = r.message
                     break
                 }
@@ -197,13 +217,32 @@ class LearnerSyncManager @Inject constructor(
         return SyncReport(status, downloaded, resolved, dropped, error, requestErrors)
     }
 
+    /**
+     * Count a failed attempt. After [MAX_RETRIES] the request goes to the back of the queue (same
+     * clientRequestId, fresh createdAt) so one stubborn topic cannot keep the others waiting.
+     */
+    private suspend fun retryRequest(item: SyncQueueItem) {
+        if (item.retryCount + 1 >= MAX_RETRIES) {
+            queue.delete(item)
+            queue.insert(SyncQueueItem(type = item.type, payload = item.payload))
+        } else {
+            queue.incrementRetry(item.id)
+        }
+    }
+
     private suspend fun fetchMissingBundles(me: MeResponse): Int {
         var n = 0
-        for (course in me.courses.filter { !bundles.has(it.courseId) }.take(MAX_BUNDLE_FETCHES)) {
+        val unavailable = progress.data.unavailableCourseIds
+        // Courses without a generator are authored ones, which the bundle endpoint refuses (422).
+        val wanted = me.courses
+            .filter { it.generator != null && it.courseId !in unavailable && !bundles.has(it.courseId) }
+            .take(MAX_BUNDLE_FETCHES)
+        for (course in wanted) {
             when (val r = api.fetchBundle(course.courseId)) {
                 is ApiResult.Ok -> { bundles.save(r.value); n++ }
-                // 404/422 (not enrolled, authored course) are expected and simply skipped.
-                else -> Log.d(TAG, "Skipping bundle ${course.courseId}: $r")
+                // Not enrolled (404) or authored (422): remember, so we do not ask again every pass.
+                is ApiResult.Rejected -> if (r.code == 404 || r.code == 422) progress.markCourseUnavailable(course.courseId)
+                else -> Log.d(TAG, "Bundle ${course.courseId} will be retried: $r")
             }
         }
         return n

@@ -5,6 +5,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -15,6 +17,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import org.ekatra.alfred.InferenceEngine
 import org.ekatra.alfred.persona.Persona
 import org.ekatra.alfred.tools.PromptFormatter
@@ -92,6 +95,9 @@ class LessonsViewModel @Inject constructor(
     /** Test seam; production uses the persona's value. */
     internal var firstTokenTimeoutMs: Long = persona.firstTokenTimeoutMs
 
+    /** Queue and progress files are written off the main thread. Tests swap it. */
+    internal var ioDispatcher: CoroutineDispatcher = Dispatchers.IO
+
     private var explainJob: Job? = null
 
     init {
@@ -116,9 +122,16 @@ class LessonsViewModel @Inject constructor(
         viewModelScope.launch { manager.status.collect { s -> _ui.update { it.copy(syncStatus = s) } } }
         viewModelScope.launch {
             // Fires on every reconnect, so queued work goes out within seconds of coming back online.
+            var wasOnline: Boolean? = null
             connectivity.onlineFlow().collect { online ->
                 _ui.update { it.copy(online = online) }
-                if (online && manager.isConfigured) syncNow()
+                if (online && manager.isConfigured) {
+                    // A real offline -> online change also replaces any WorkManager run that is sitting
+                    // in retry backoff, in case this screen is closed before the sync below finishes.
+                    if (wasOnline == false) trigger.enqueue(replace = true)
+                    syncNow()
+                }
+                wasOnline = online
             }
         }
     }
@@ -187,31 +200,51 @@ class LessonsViewModel @Inject constructor(
         // Review lessons have no text to read, so they open straight on the quiz.
         val stage = if (lesson.isReview || lesson.content.isNullOrBlank()) Stage.QUIZ else Stage.READ
         _ui.update { it.copy(screen = LessonsScreen.Lesson(courseId, lessonId, stage), quiz = QuizState(), explain = ExplainState.Idle) }
-        if (stage == Stage.QUIZ && lesson.questions.isEmpty()) finishLesson()
+        if (stage == Stage.QUIZ) startQuiz()
     }
 
     fun startQuiz() {
         val s = _ui.value.screen as? LessonsScreen.Lesson ?: return
         val lesson = findLesson(s.courseId, s.lessonId) ?: return
         if (lesson.questions.isEmpty()) { finishLesson(); return }
-        _ui.update { it.copy(screen = s.copy(stage = Stage.QUIZ), quiz = QuizState()) }
+        val (quiz, explain) = enterQuestion(lesson, 0, 0)
+        _ui.update { it.copy(screen = s.copy(stage = Stage.QUIZ), quiz = quiz, explain = explain) }
     }
 
-    /** Grade locally, record it, queue the event, and ask Maya to explain a miss. */
+    /**
+     * A question is answered once. If this learner already answered it (an earlier visit), show that
+     * answer locked instead of letting them answer again, so retaking a lesson never sends a second
+     * answer for the same question.
+     */
+    private fun enterQuestion(lesson: BundleLesson, index: Int, correctSoFar: Int): Pair<QuizState, ExplainState> {
+        val q = lesson.questions[index]
+        val prev = progress.answerFor(q.id) ?: return QuizState(index, null, null, correctSoFar) to ExplainState.Idle
+        val quiz = QuizState(index, prev.answer, prev.correct, correctSoFar + if (prev.correct) 1 else 0)
+        return quiz to if (prev.correct) ExplainState.Idle else fallbackFor(q)
+    }
+
+    private fun fallbackFor(q: BundleQuestion) = ExplainState.Fallback(
+        q.explanation?.takeIf { it.isNotBlank() } ?: "The correct answer is ${q.correctAnswer}."
+    )
+
+    /** Grade locally, queue the event, record it, and ask Maya to explain a miss. */
     fun answer(letter: String) {
         val s = _ui.value.screen as? LessonsScreen.Lesson ?: return
         val quiz = _ui.value.quiz
         if (s.stage != Stage.QUIZ || quiz.selected != null) return
         val lesson = findLesson(s.courseId, s.lessonId) ?: return
         val question = lesson.questions.getOrNull(quiz.index) ?: return
+        if (progress.answerFor(question.id) != null) return // locked after the first answer
 
         val correct = LessonGrading.isCorrect(question, letter)
-        progress.recordAnswer(s.courseId, s.lessonId, question.id, letter, correct, LearnerSyncManager.nowIso())
         _ui.update {
             it.copy(quiz = quiz.copy(selected = letter, correct = correct, correctCount = quiz.correctCount + if (correct) 1 else 0))
         }
-        viewModelScope.launch {
+        viewModelScope.launch(ioDispatcher) {
+            // Queue row first, progress file second: if the process dies in between, the answer is
+            // still on its way to the server (and the learner just sees the question unanswered).
             manager.enqueueQuizAnswer(s.courseId, s.lessonId, question.id, letter, correct)
+            progress.recordAnswer(s.courseId, s.lessonId, question.id, letter, correct, LearnerSyncManager.nowIso())
             trigger.enqueue()
         }
         if (!correct) explainWrongAnswer(lesson, question, letter)
@@ -224,7 +257,8 @@ class LessonsViewModel @Inject constructor(
         if (quiz.selected == null) return
         explainJob?.cancel()
         if (quiz.index + 1 < lesson.questions.size) {
-            _ui.update { it.copy(quiz = quiz.copy(index = quiz.index + 1, selected = null, correct = null), explain = ExplainState.Idle) }
+            val (nextQuiz, explain) = enterQuestion(lesson, quiz.index + 1, quiz.correctCount)
+            _ui.update { it.copy(quiz = nextQuiz, explain = explain) }
         } else {
             finishLesson()
         }
@@ -233,10 +267,10 @@ class LessonsViewModel @Inject constructor(
     private fun finishLesson() {
         val s = _ui.value.screen as? LessonsScreen.Lesson ?: return
         explainJob?.cancel()
-        progress.markCompleted(s.lessonId)
         _ui.update { it.copy(screen = s.copy(stage = Stage.DONE), explain = ExplainState.Idle) }
-        viewModelScope.launch {
+        viewModelScope.launch(ioDispatcher) {
             manager.enqueueLessonCompleted(s.courseId, s.lessonId)
+            progress.markCompleted(s.lessonId)
             trigger.enqueue()
             if (connectivity.isOnline() && manager.isConfigured) runSync()
         }
@@ -254,8 +288,7 @@ class LessonsViewModel @Inject constructor(
 
     private fun explainWrongAnswer(lesson: BundleLesson, question: BundleQuestion, chosen: String) {
         explainJob?.cancel()
-        val fallback = ExplainState.Fallback(question.explanation?.takeIf { it.isNotBlank() }
-            ?: "The correct answer is ${question.correctAnswer}.")
+        val fallback = fallbackFor(question)
         val model = locator.locate()
         if (model == null) {
             _ui.update { it.copy(explain = fallback) }

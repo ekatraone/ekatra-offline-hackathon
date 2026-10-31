@@ -33,13 +33,14 @@ class AppModelLocator @Inject constructor(
 
 /** Durable "sync when there is a network" trigger, behind an interface so the ViewModel is testable. */
 interface SyncTrigger {
-    fun enqueue()
+    /** [replace] swaps any queued or backing-off run for a fresh one; use it on reconnect. */
+    fun enqueue(replace: Boolean = false)
 }
 
 class WorkManagerSyncTrigger @Inject constructor(
     @ApplicationContext private val context: Context
 ) : SyncTrigger {
-    override fun enqueue() = SyncWorker.enqueueLearnerSync(context)
+    override fun enqueue(replace: Boolean) = SyncWorker.enqueueLearnerSync(context, replace)
 }
 
 @Module

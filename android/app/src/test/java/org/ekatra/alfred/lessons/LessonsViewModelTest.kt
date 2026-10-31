@@ -33,6 +33,7 @@ class LessonsViewModelTest {
     private lateinit var locator: FakeLocator
     private lateinit var trigger: FakeTrigger
     private val mutex = Mutex()
+    private val io = CountingDispatcher()
     private lateinit var manager: LearnerSyncManager
     private lateinit var vm: LessonsViewModel
 
@@ -54,9 +55,11 @@ class LessonsViewModelTest {
     fun tearDown() { Dispatchers.resetMain(); dir.deleteRecursively() }
 
     private fun newVm(config: SyncConfig = SyncConfig("http://x", "tok")): LessonsViewModel {
-        manager = LearnerSyncManager(api, dao, bundles, progress, config, net)
+        manager = LearnerSyncManager(api, dao, bundles, progress, config, net).also {
+            it.ioDispatcher = Dispatchers.Unconfined
+        }
         return LessonsViewModel(manager, bundles, progress, net, engine, locator, trigger, mutex, ActivePersona)
-            .also { vm = it }
+            .also { it.ioDispatcher = io; vm = it }
     }
 
     private fun queuedEvents() = dao.items.filter { it.type == "learner_event" }
@@ -372,5 +375,98 @@ class LessonsViewModelTest {
         val t = lessonText("A half is *one of two* parts.\n\nNext **bold** too.")
         assertEquals("A half is one of two parts.\n\nNext bold too.", t.text)
         assertEquals(2, t.spanStyles.size)
+    }
+
+    // ---- fix 4: reconnect ----
+
+    @Test
+    fun `a real reconnect replaces the WorkManager run and syncs, the first online reading does not`() = runTest {
+        newVm()
+        assertEquals("opening the screen while online is not a reconnect", 0, trigger.replaceCount)
+
+        net.online = false
+        assertEquals(0, trigger.replaceCount)
+        net.online = true
+
+        assertEquals(1, trigger.replaceCount)
+        assertEquals(2, api.meCalls) // once on open, once on reconnect
+    }
+
+    // ---- fix 7: locking, ordering, threading ----
+
+    @Test
+    fun `a question already answered on an earlier visit is shown locked and sends nothing new`() = runTest {
+        newVm(); net.online = false
+        openQuiz()
+        vm.answer("A") // wrong
+        val first = queuedEvents().single()
+        vm.back()
+
+        openQuiz() // second visit
+
+        val quiz = vm.uiState.value.quiz
+        assertEquals("A", quiz.selected)
+        assertEquals(false, quiz.correct)
+        assertEquals(ExplainState.Fallback("Half of ten is five."), vm.uiState.value.explain)
+        vm.answer("B")
+        assertEquals("tapping again must not change or resend the answer", listOf(first), queuedEvents())
+        assertEquals("A", progress.answerFor("q1")?.answer)
+        assertEquals("no model call on a revisit", 1, engine.prompts.size)
+    }
+
+    @Test
+    fun `revisiting counts earlier correct answers toward the score`() = runTest {
+        newVm(); net.online = false
+        openQuiz(); vm.answer("B"); vm.back() // q1 right, then leave
+
+        openQuiz()
+        assertEquals(1, vm.uiState.value.quiz.correctCount)
+        vm.next()
+        vm.answer("A") // q2 right
+        vm.next()
+
+        assertEquals(2, vm.uiState.value.quiz.correctCount)
+        assertEquals(1, queuedEvents().count { it.questionId == "q1" })
+    }
+
+    @Test
+    fun `the queue row is written before the progress file`() = runTest {
+        newVm(); net.online = false
+        var progressWhenQueued: StoredAnswer? = StoredAnswer("x", "x", "x", false, "x")
+        dao.onInsert = { if (it.type == "learner_event") progressWhenQueued = progress.answerFor("q1") }
+        openQuiz()
+
+        vm.answer("B")
+
+        assertNull("progress must not exist yet when the queue row is stored", progressWhenQueued)
+        assertNotNull(progress.answerFor("q1"))
+    }
+
+    @Test
+    fun `answer and completion disk writes run on the IO dispatcher`() = runTest {
+        newVm(); net.online = false
+        openQuiz()
+        val before = io.dispatched
+
+        vm.answer("B")
+        assertTrue(io.dispatched > before)
+
+        val afterAnswer = io.dispatched
+        vm.next(); vm.answer("A"); vm.next() // finishes the lesson
+        assertTrue(io.dispatched > afterAnswer)
+    }
+
+    @Test
+    fun `re-answering after a crash between the queue write and the progress write is a duplicate id`() = runTest {
+        newVm(); net.online = false
+        // Simulate the crash: the queue row exists but progress was never recorded.
+        manager.enqueueQuizAnswer(course, lesson, "q1", "B", true)
+        openQuiz()
+
+        vm.answer("B")
+
+        val ids = queuedEvents().map { it.clientEventId }
+        assertEquals(2, ids.size)
+        assertEquals("the server will count the second as a duplicate", ids[0], ids[1])
     }
 }

@@ -76,8 +76,8 @@ class LearnerSyncClientTest {
     @After fun stop() { server.close() }
 
     @Test
-    fun `read timeout for lesson generation is at least 240 seconds`() {
-        assertTrue(LearnerSyncClient.LESSON_READ_TIMEOUT_MS >= 240_000)
+    fun `read timeout for lesson generation outlasts the server's 240 second limit`() {
+        assertEquals(300_000, LearnerSyncClient.LESSON_READ_TIMEOUT_MS)
         assertTrue(LearnerSyncClient.READ_TIMEOUT_MS < LearnerSyncClient.LESSON_READ_TIMEOUT_MS)
     }
 

@@ -19,7 +19,9 @@ data class ProgressData(
     val completedLessonIds: Set<String> = emptySet(),
     /** Last profile the server sent (from /me or an events response). */
     val me: MeResponse? = null,
-    val profile: ServerProfile? = null
+    val profile: ServerProfile? = null,
+    /** Courses the bundle endpoint refused with 404/422; not asked for again. */
+    val unavailableCourseIds: Set<String> = emptySet()
 )
 
 /** Small JSON store for local answers, completion and the cached server profile. */
@@ -51,6 +53,11 @@ class LessonProgressStore(private val file: File) {
     }
 
     @Synchronized
+    fun markCourseUnavailable(courseId: String) {
+        update { it.copy(unavailableCourseIds = it.unavailableCourseIds + courseId) }
+    }
+
+    @Synchronized
     fun saveProfile(profile: ServerProfile) {
         update { it.copy(profile = profile) }
     }
@@ -70,6 +77,7 @@ class LessonProgressStore(private val file: File) {
     private fun read(): ProgressData = runCatching {
         gson.fromJson(file.readText(Charsets.UTF_8), ProgressData::class.java)
             // Gson skips constructors, so a hand-edited or older file can leave these null.
-            ?.let { it.copy(answers = it.answers ?: emptyMap(), completedLessonIds = it.completedLessonIds ?: emptySet()) }
+            ?.let { it.copy(answers = it.answers ?: emptyMap(), completedLessonIds = it.completedLessonIds ?: emptySet(),
+                unavailableCourseIds = it.unavailableCourseIds ?: emptySet()) }
     }.getOrNull() ?: ProgressData()
 }

@@ -11,8 +11,11 @@ class FakeQueueDao : SyncQueueDao {
     private val rows = MutableStateFlow<List<SyncQueueItem>>(emptyList())
     private var nextId = 1L
     val items: List<SyncQueueItem> get() = rows.value
+    /** Called just before a row is stored, to check ordering against other writes. */
+    var onInsert: (SyncQueueItem) -> Unit = {}
 
     override suspend fun insert(item: SyncQueueItem): Long {
+        onInsert(item)
         val id = nextId++
         rows.value = rows.value + item.copy(id = id)
         return id
@@ -26,6 +29,7 @@ class FakeQueueDao : SyncQueueDao {
     override suspend fun delete(item: SyncQueueItem) { rows.value = rows.value.filterNot { it.id == item.id } }
     override suspend fun deleteById(id: Long) { rows.value = rows.value.filterNot { it.id == id } }
     override suspend fun deleteAll() { rows.value = emptyList() }
+    override suspend fun deleteByType(type: String) { rows.value = rows.value.filterNot { it.type == type } }
     override suspend fun incrementRetry(id: Long) {
         rows.value = rows.value.map { if (it.id == id) it.copy(retryCount = it.retryCount + 1) else it }
     }
@@ -108,5 +112,12 @@ class FakeLocator(var model: LocatedModel? = LocatedModel("llama-3.2-1b-instruct
 
 class FakeTrigger : SyncTrigger {
     var count = 0
-    override fun enqueue() { count++ }
+    var replaceCount = 0
+    override fun enqueue(replace: Boolean) { count++; if (replace) replaceCount++ }
+}
+
+/** Counts every block it is asked to run, so a test can prove work went through the IO dispatcher. */
+class CountingDispatcher : kotlinx.coroutines.CoroutineDispatcher() {
+    var dispatched = 0
+    override fun dispatch(context: kotlin.coroutines.CoroutineContext, block: Runnable) { dispatched++; block.run() }
 }

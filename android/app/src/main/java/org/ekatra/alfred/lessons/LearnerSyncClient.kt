@@ -27,8 +27,8 @@ class LearnerSyncClient internal constructor(
     companion object {
         const val CONNECT_TIMEOUT_MS = 5_000
         const val READ_TIMEOUT_MS = 60_000
-        /** Muse Spark takes 60-240 s to write a lesson; the contract requires at least 240 s. */
-        const val LESSON_READ_TIMEOUT_MS = 240_000
+        /** Muse Spark takes 60-240 s to write a lesson and the server gives up at 240 s; wait 300 s so we never quit first. */
+        const val LESSON_READ_TIMEOUT_MS = 300_000
         const val EVENT_BATCH_LIMIT = 20
     }
 

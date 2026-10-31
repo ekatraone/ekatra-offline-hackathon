@@ -193,17 +193,96 @@ class LearnerSyncManagerTest {
     }
 
     @Test
-    fun `events are dropped only after the maximum retries`() = runTest {
+    fun `no whole-request error other than 401 ever deletes events`() = runTest {
         manager.enqueueQuizAnswer("c", "l", "q1", "A", true)
-        api.eventsResult = { ApiResult.Rejected(400, "bad") }
+        for (code in listOf(400, 403, 404, 408, 409, 413, 422, 429, 500, 503)) {
+            api.eventsResult = {
+                if (code == 429 || code >= 500) ApiResult.Retryable("HTTP $code") else ApiResult.Rejected(code, "HTTP $code")
+            }
+            repeat(2) { manager.sync() }
+            assertEquals("after HTTP $code", 1, dao.items.size)
+        }
+        // Far past the old five-retry give-up point, and the row is still there.
+        assertTrue(dao.items.single().retryCount > LearnerSyncManager.MAX_RETRIES)
+    }
 
-        repeat(LearnerSyncManager.MAX_RETRIES) { manager.sync() }
-        assertEquals(1, dao.items.size)
-        assertEquals(LearnerSyncManager.MAX_RETRIES, dao.items.single().retryCount)
+    @Test
+    fun `lesson requests are dropped only on 400 or 422 and the error is shown`() = runTest {
+        for (code in listOf(400, 422)) {
+            manager.enqueueLessonRequest("topic $code", "en")
+            api.lessonResult = { _, _, _ -> ApiResult.Rejected(code, "bad topic $code") }
+
+            val report = manager.sync()
+
+            assertEquals("HTTP $code", listOf("bad topic $code"), report.requestErrors)
+            assertTrue("HTTP $code should be dropped", dao.items.isEmpty())
+        }
+    }
+
+    @Test
+    fun `lesson requests are retried on 404, 408, 409, 413, 429 and 5xx`() = runTest {
+        for (code in listOf(404, 408, 409, 413, 429, 500, 502, 503, 504)) {
+            dao.deleteAll()
+            manager.enqueueLessonRequest("fractions", "en")
+            api.lessonResult = { _, _, _ ->
+                if (code == 429 || code >= 500) ApiResult.Retryable("HTTP $code") else ApiResult.Rejected(code, "HTTP $code")
+            }
+
+            val report = manager.sync()
+
+            assertEquals("HTTP $code should stay queued", 1, dao.items.size)
+            assertEquals("HTTP $code should count a retry", 1, dao.items.single().retryCount)
+            assertTrue("HTTP $code is not shown as a learner error", report.requestErrors.isEmpty())
+        }
+    }
+
+    @Test
+    fun `a 409 in_progress keeps the same request id for the next try`() = runTest {
+        val id = manager.enqueueLessonRequest("fractions", "en")
+        api.lessonResult = { _, _, _ -> ApiResult.Rejected(409, "in_progress") }
+        manager.sync()
+
+        api.lessonResult = { _, _, _ -> ApiResult.Ok(RequestLessonResult("course-1", sampleBundle())) }
+        manager.sync()
+
+        assertEquals(listOf(id, id), api.lessonCalls.map { it.third })
+        assertTrue(dao.items.isEmpty())
+        assertNotNull(bundles.get("course-1"))
+    }
+
+    @Test
+    fun `one failing lesson request does not block the ones behind it`() = runTest {
+        manager.enqueueLessonRequest("stuck", "en")
+        manager.enqueueLessonRequest("fine", "en")
+        api.lessonResult = { topic, _, _ ->
+            if (topic == "stuck") ApiResult.Retryable("HTTP 503")
+            else ApiResult.Ok(RequestLessonResult("course-1", sampleBundle()))
+        }
 
         val report = manager.sync()
-        assertEquals(1, report.requestsDropped)
-        assertTrue(dao.items.isEmpty())
+
+        assertEquals(listOf("stuck", "fine"), api.lessonCalls.map { it.first })
+        assertEquals(1, report.lessonsDownloaded)
+        assertEquals(listOf("stuck"), manager.pendingRequestTopics())
+    }
+
+    @Test
+    fun `after five retries a stuck request moves to the back of the queue`() = runTest {
+        val stuck = manager.enqueueLessonRequest("stuck", "en")
+        api.lessonResult = { _, _, _ -> ApiResult.Retryable("HTTP 503") }
+
+        repeat(LearnerSyncManager.MAX_RETRIES - 1) { manager.sync() }
+        manager.enqueueLessonRequest("waiting", "en") // arrives later, so it has fewer retries
+        assertEquals(listOf("stuck", "waiting"), manager.pendingRequestTopics())
+        assertEquals(LearnerSyncManager.MAX_RETRIES - 1, dao.items.first().retryCount)
+
+        manager.sync() // stuck's fifth failure, waiting's first
+
+        assertEquals(listOf("waiting", "stuck"), manager.pendingRequestTopics())
+        val moved = dao.items.last()
+        assertTrue("same clientRequestId, so the server stays idempotent", moved.payload.contains(stuck))
+        assertEquals(0, moved.retryCount)
+        assertEquals(1, dao.items.first().retryCount)
     }
 
     @Test
@@ -231,9 +310,10 @@ class LearnerSyncManagerTest {
 
     @Test
     fun `sync caches the server profile and fetches courses made elsewhere`() = runTest {
+        val gen = Generator("meta", "muse-spark-1.3")
         api.meResult = {
             ApiResult.Ok(MeResponse(
-                courses = listOf(MeCourse("whatsapp-course"), MeCourse("authored-course")),
+                courses = listOf(MeCourse("whatsapp-course", generator = gen), MeCourse("authored-course", generator = gen)),
                 profile = ServerProfile(mastery = mapOf("lesson-1" to 0.5)),
                 lessonTitles = mapOf("lesson-1" to "Halves")
             ))
@@ -266,5 +346,62 @@ class LearnerSyncManagerTest {
         java.util.UUID.fromString(ev.clientEventId)
         assertEquals("lesson_completed", ev.type)
         assertTrue(ev.occurredAt.matches(Regex("""\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z""")))
+    }
+
+    // ---- /me bundle pull ----
+
+    @Test
+    fun `courses with no generator are never fetched`() = runTest {
+        val fetched = mutableListOf<String>()
+        api.meResult = { ApiResult.Ok(MeResponse(courses = listOf(MeCourse("authored", generator = null)))) }
+        api.bundleResult = { fetched += it; ApiResult.Ok(sampleBundle(courseId = it)) }
+
+        manager.sync()
+
+        assertTrue(fetched.isEmpty())
+    }
+
+    @Test
+    fun `a course that returned 404 or 422 is not asked for again`() = runTest {
+        val gen = Generator("meta", "muse-spark-1.3")
+        val fetched = mutableListOf<String>()
+        api.meResult = { ApiResult.Ok(MeResponse(courses = listOf(MeCourse("gone", generator = gen), MeCourse("authored", generator = gen)))) }
+        api.bundleResult = { id ->
+            fetched += id
+            ApiResult.Rejected(if (id == "gone") 404 else 422, "no")
+        }
+
+        manager.sync()
+        manager.sync()
+        manager.sync()
+
+        assertEquals(listOf("gone", "authored"), fetched)
+        // ...and it is remembered across a restart.
+        assertEquals(setOf("gone", "authored"), LessonProgressStore(File(dir, "progress.json")).data.unavailableCourseIds)
+    }
+
+    @Test
+    fun `a course that failed with a network error is tried again`() = runTest {
+        val gen = Generator("meta", "muse-spark-1.3")
+        var calls = 0
+        api.meResult = { ApiResult.Ok(MeResponse(courses = listOf(MeCourse("flaky", generator = gen)))) }
+        api.bundleResult = { calls++; ApiResult.Retryable("reset") }
+
+        manager.sync(); manager.sync()
+
+        assertEquals(2, calls)
+    }
+
+    // ---- event ids ----
+
+    @Test
+    fun `answering the same question again reuses one clientEventId`() = runTest {
+        manager.enqueueQuizAnswer("c", "l", "q1", "A", false)
+        manager.enqueueQuizAnswer("c", "l", "q1", "B", true)
+        manager.enqueueQuizAnswer("c", "l", "q2", "A", true)
+
+        val ids = dao.items.map { com.google.gson.Gson().fromJson(it.payload, LearnerEvent::class.java).clientEventId }
+        assertEquals(ids[0], ids[1])
+        assertTrue(ids[0] != ids[2])
     }
 }

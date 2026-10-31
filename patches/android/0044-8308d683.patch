@@ -1,0 +1,95 @@
+diff --git a/app/src/main/java/org/ekatra/alfred/data/local/SyncQueueDao.kt b/app/src/main/java/org/ekatra/alfred/data/local/SyncQueueDao.kt
+index 7f7eb3a..de3d0d7 100644
+--- a/app/src/main/java/org/ekatra/alfred/data/local/SyncQueueDao.kt
++++ b/app/src/main/java/org/ekatra/alfred/data/local/SyncQueueDao.kt
+@@ -36,6 +36,9 @@ interface SyncQueueDao {
+     @Query("DELETE FROM sync_queue")
+     suspend fun deleteAll()
+ 
++    @Query("DELETE FROM sync_queue WHERE type = :type")
++    suspend fun deleteByType(type: String)
++
+     @Query("UPDATE sync_queue SET retryCount = retryCount + 1 WHERE id = :id")
+     suspend fun incrementRetry(id: Long)
+ }
+diff --git a/app/src/main/java/org/ekatra/alfred/data/sync/SyncManager.kt b/app/src/main/java/org/ekatra/alfred/data/sync/SyncManager.kt
+index 6d993f6..d90c282 100644
+--- a/app/src/main/java/org/ekatra/alfred/data/sync/SyncManager.kt
++++ b/app/src/main/java/org/ekatra/alfred/data/sync/SyncManager.kt
+@@ -113,8 +113,9 @@ class SyncManager @Inject constructor(
+             }
+             // Delete user document
+             firestore.collection("users").document(uid).delete().await()
+-            // Clear local sync queue
+-            syncQueueDao.deleteAll()
++            // Clear the queued analytics only. Unsynced quiz answers and lesson requests are the
++            // learner's own progress, not cloud data, and must survive "Delete Cloud Data".
++            syncQueueDao.deleteByType(TYPE_CHAT_ANALYTICS)
+             Log.d(TAG, "All cloud data deleted for $uid")
+         } catch (e: Exception) {
+             Log.e(TAG, "Failed to delete cloud data", e)
+diff --git a/app/src/main/java/org/ekatra/alfred/data/sync/SyncWorker.kt b/app/src/main/java/org/ekatra/alfred/data/sync/SyncWorker.kt
+index 27b28b2..065f5dd 100644
+--- a/app/src/main/java/org/ekatra/alfred/data/sync/SyncWorker.kt
++++ b/app/src/main/java/org/ekatra/alfred/data/sync/SyncWorker.kt
+@@ -27,16 +27,27 @@ class SyncWorker @AssistedInject constructor(
+         const val WORK_NAME = "ekatra_sync"
+         const val LEARNER_WORK_NAME = "learner_sync"
+ 
++        /** Short linear backoff: a cold-start failure retries after 10 s, 20 s, ... not minutes. */
++        const val LEARNER_BACKOFF_SECONDS = 10L
++
++        internal fun learnerSyncRequest(): OneTimeWorkRequest =
++            OneTimeWorkRequestBuilder<SyncWorker>()
++                .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
++                .setBackoffCriteria(BackoffPolicy.LINEAR, LEARNER_BACKOFF_SECONDS, TimeUnit.SECONDS)
++                .build()
++
++        internal fun learnerSyncPolicy(replace: Boolean): ExistingWorkPolicy =
++            if (replace) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP
++
+         /**
+          * Queue a learner sync (lesson requests + quiz events) to run once there is a network.
+-         * KEEP: if one is already queued or running, it will pick up the new rows.
++         * Normal triggers use KEEP: a queued run will pick up the new rows. On reconnect pass
++         * [replace] = true, so a run that is sitting in retry backoff is replaced by a fresh one
++         * and "Synced" shows within seconds of the network coming back.
+          */
+-        fun enqueueLearnerSync(context: Context) {
+-            val request = OneTimeWorkRequestBuilder<SyncWorker>()
+-                .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+-                .build()
++        fun enqueueLearnerSync(context: Context, replace: Boolean = false) {
+             WorkManager.getInstance(context).enqueueUniqueWork(
+-                LEARNER_WORK_NAME, ExistingWorkPolicy.KEEP, request
++                LEARNER_WORK_NAME, learnerSyncPolicy(replace), learnerSyncRequest()
+             )
+         }
+ 
+diff --git a/app/src/test/java/org/ekatra/alfred/data/SyncManagerTest.kt b/app/src/test/java/org/ekatra/alfred/data/SyncManagerTest.kt
+index 2ab4838..ad48ecf 100644
+--- a/app/src/test/java/org/ekatra/alfred/data/SyncManagerTest.kt
++++ b/app/src/test/java/org/ekatra/alfred/data/SyncManagerTest.kt
+@@ -203,4 +203,22 @@ class SyncManagerTest {
+     fun `pendingSyncCount counts analytics only`() = runTest {
+         verify { syncQueueDao.countByType("chat_analytics") }
+     }
++
++    @Test
++    fun `delete cloud data clears queued analytics only, so unsynced quiz answers survive`() = runTest {
++        goOnline("uid-1")
++        val snapshot = mockk<QuerySnapshot>()
++        every { snapshot.iterator() } returns mutableListOf<QueryDocumentSnapshot>().iterator()
++        every {
++            firestore.collection("users").document("uid-1").collection("analytics").get()
++        } returns Tasks.forResult(snapshot)
++        every { firestore.collection("users").document("uid-1").delete() } returns Tasks.forResult(null)
++
++        syncManager.deleteAllCloudData()
++
++        coVerify(exactly = 1) { syncQueueDao.deleteByType("chat_analytics") }
++        coVerify(exactly = 0) { syncQueueDao.deleteAll() }
++        coVerify(exactly = 0) { syncQueueDao.deleteByType("learner_event") }
++        coVerify(exactly = 0) { syncQueueDao.deleteByType("lesson_request") }
++    }
+ }
