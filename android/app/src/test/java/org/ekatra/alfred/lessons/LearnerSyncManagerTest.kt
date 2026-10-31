@@ -156,13 +156,65 @@ class LearnerSyncManagerTest {
     }
 
     @Test
-    fun `a rejected lesson request is dropped instead of retried forever`() = runTest {
+    fun `a rejected lesson request is dropped and its error is surfaced`() = runTest {
         manager.enqueueLessonRequest("x", "en")
         api.lessonResult = { _, _, _ -> ApiResult.Rejected(400, "topic too short") }
 
         val report = manager.sync()
 
         assertEquals(1, report.requestsDropped)
+        assertEquals(listOf("topic too short"), report.requestErrors)
+        assertTrue(dao.items.isEmpty())
+    }
+
+    @Test
+    fun `a whole-request 4xx keeps the events and bumps retry`() = runTest {
+        repeat(3) { manager.enqueueQuizAnswer("c", "l", "q$it", "A", true) }
+        for (code in listOf(400, 404, 422)) {
+            api.eventsResult = { ApiResult.Rejected(code, "bad request") }
+
+            val report = manager.sync()
+
+            assertEquals("after HTTP $code", 3, dao.items.size)
+            assertEquals(SyncStatus.ERROR, report.status)
+            assertEquals(0, report.requestsDropped)
+        }
+        assertTrue(dao.items.all { it.retryCount == 3 })
+    }
+
+    @Test
+    fun `a whole-request 4xx does not loop on the same batch within one pass`() = runTest {
+        manager.enqueueQuizAnswer("c", "l", "q1", "A", true)
+        api.eventsResult = { ApiResult.Rejected(422, "unsupported") }
+
+        manager.sync()
+
+        assertEquals(1, api.eventBatches.size)
+    }
+
+    @Test
+    fun `events are dropped only after the maximum retries`() = runTest {
+        manager.enqueueQuizAnswer("c", "l", "q1", "A", true)
+        api.eventsResult = { ApiResult.Rejected(400, "bad") }
+
+        repeat(LearnerSyncManager.MAX_RETRIES) { manager.sync() }
+        assertEquals(1, dao.items.size)
+        assertEquals(LearnerSyncManager.MAX_RETRIES, dao.items.single().retryCount)
+
+        val report = manager.sync()
+        assertEquals(1, report.requestsDropped)
+        assertTrue(dao.items.isEmpty())
+    }
+
+    @Test
+    fun `a failed lesson request does not stop events from syncing`() = runTest {
+        manager.enqueueLessonRequest("x", "en")
+        manager.enqueueQuizAnswer("c", "l", "q1", "A", true)
+        api.lessonResult = { _, _, _ -> ApiResult.Rejected(400, "topic too short") }
+
+        manager.sync()
+
+        assertEquals(1, api.eventBatches.size)
         assertTrue(dao.items.isEmpty())
     }
 
@@ -195,30 +247,6 @@ class LearnerSyncManagerTest {
         assertEquals(0.5, progress.data.profile!!.mastery["lesson-1"]!!, 0.0)
         assertNotNull(bundles.get("whatsapp-course"))
         assertNull(bundles.get("authored-course"))
-    }
-
-    @Test
-    fun `requestLesson online generates now and offline queues with the same id`() = runTest {
-        api.lessonResult = { _, _, _ -> ApiResult.Ok(RequestLessonResult("course-1", sampleBundle())) }
-        val online = manager.requestLesson("fractions", "en")
-        assertTrue(online is LessonRequestOutcome.Downloaded)
-        assertTrue(dao.items.isEmpty())
-
-        net.online = false
-        val offline = manager.requestLesson("decimals", "en")
-        assertTrue(offline is LessonRequestOutcome.Queued)
-        assertEquals(listOf("decimals"), manager.pendingRequestTopics())
-        assertEquals(1, api.lessonCalls.size)
-    }
-
-    @Test
-    fun `requestLesson that fails mid-call is queued under the id it already sent`() = runTest {
-        api.lessonResult = { _, _, _ -> ApiResult.Retryable("reset") }
-
-        val out = manager.requestLesson("fractions", "en") as LessonRequestOutcome.Queued
-
-        assertEquals(api.lessonCalls.single().third, out.clientRequestId)
-        assertTrue(dao.items.single().payload.contains(out.clientRequestId))
     }
 
     @Test

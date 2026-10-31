@@ -6,6 +6,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.ekatra.alfred.data.local.SyncQueueDao
 import org.ekatra.alfred.data.model.SyncQueueItem
 import java.text.SimpleDateFormat
@@ -23,15 +24,10 @@ data class SyncReport(
     val lessonsDownloaded: Int = 0,
     val eventsResolved: Int = 0,
     val requestsDropped: Int = 0,
-    val message: String? = null
+    val message: String? = null,
+    /** One entry per lesson request the server refused, e.g. "topic must be 2-120 characters". */
+    val requestErrors: List<String> = emptyList()
 )
-
-sealed interface LessonRequestOutcome {
-    data class Downloaded(val bundle: LessonBundle) : LessonRequestOutcome
-    /** Saved to the queue; it is generated on the next sync. */
-    data class Queued(val clientRequestId: String) : LessonRequestOutcome
-    data class Failed(val message: String) : LessonRequestOutcome
-}
 
 /**
  * Syncs the learner's own learning data with the platform. Deliberately separate from [org.ekatra.alfred.data.sync.SyncManager]:
@@ -55,6 +51,8 @@ class LearnerSyncManager @Inject constructor(
         const val TYPE_LESSON_REQUEST = "lesson_request"
         val QUEUE_TYPES = listOf(TYPE_LEARNER_EVENT, TYPE_LESSON_REQUEST)
         private const val MAX_REQUESTS_PER_RUN = 10
+        /** Same give-up point as the analytics SyncManager. */
+        const val MAX_RETRIES = 5
         private const val MAX_BUNDLE_FETCHES = 5
 
         fun nowIso(millis: Long = System.currentTimeMillis()): String =
@@ -107,48 +105,19 @@ class LearnerSyncManager @Inject constructor(
         return clientRequestId
     }
 
-    /**
-     * Ask for a lesson. Online: generate now. Offline, or if the network drops mid-call: queue the
-     * same clientRequestId, so the server returns the same course instead of generating twice.
-     */
-    suspend fun requestLesson(topic: String, language: String): LessonRequestOutcome {
-        if (!config.isConfigured) return LessonRequestOutcome.Failed("Lessons sync is not configured")
-        val id = UUID.randomUUID().toString()
-        if (!connectivity.isOnline()) {
-            enqueueLessonRequest(topic, language, id)
-            return LessonRequestOutcome.Queued(id)
-        }
-        return when (val r = api.requestLesson(topic, language, id)) {
-            is ApiResult.Ok -> {
-                bundles.save(r.value.bundle)
-                LessonRequestOutcome.Downloaded(r.value.bundle)
-            }
-            is ApiResult.Retryable -> {
-                enqueueLessonRequest(topic, language, id)
-                LessonRequestOutcome.Queued(id)
-            }
-            is ApiResult.Unauthorized -> {
-                _status.value = SyncStatus.UNAUTHORIZED
-                LessonRequestOutcome.Failed("Not signed in to the lessons service (${r.message})")
-            }
-            is ApiResult.Rejected -> LessonRequestOutcome.Failed(r.message)
-        }
-    }
-
     // ---- sync ----
 
     /** One full pass: lesson requests, then events in batches, then refresh /me. Never overlaps itself. */
     suspend fun sync(): SyncReport {
         if (!config.isConfigured) return SyncReport(SyncStatus.NOT_CONFIGURED).also { _status.value = it.status }
         if (!connectivity.isOnline()) return SyncReport(SyncStatus.OFFLINE).also { _status.value = it.status }
-        if (!runLock.tryLock()) return SyncReport(SyncStatus.RUNNING)
-        try {
+        // Queue behind a running pass rather than skipping: rows enqueued after that pass read the
+        // queue would otherwise wait for the next trigger. Passes never overlap.
+        return runLock.withLock {
             _status.value = SyncStatus.RUNNING
             val report = runPass()
             _status.value = report.status
-            return report
-        } finally {
-            runLock.unlock()
+            report
         }
     }
 
@@ -157,6 +126,7 @@ class LearnerSyncManager @Inject constructor(
         var resolved = 0
         var dropped = 0
         var error: String? = null
+        val requestErrors = mutableListOf<String>()
 
         // 1. Lesson requests first, so the bundle exists before its events are posted.
         for (item in queue.getPendingByType(TYPE_LESSON_REQUEST, MAX_REQUESTS_PER_RUN)) {
@@ -164,9 +134,14 @@ class LearnerSyncManager @Inject constructor(
             if (req == null) { queue.delete(item); dropped++; continue }
             when (val r = api.requestLesson(req.topic, req.language, req.clientRequestId)) {
                 is ApiResult.Ok -> { bundles.save(r.value.bundle); queue.delete(item); downloaded++ }
-                is ApiResult.Unauthorized -> return SyncReport(SyncStatus.UNAUTHORIZED, downloaded, resolved, dropped, r.message)
+                is ApiResult.Unauthorized -> return SyncReport(SyncStatus.UNAUTHORIZED, downloaded, resolved, dropped, r.message, requestErrors)
                 is ApiResult.Retryable -> { queue.incrementRetry(item.id); error = r.message; break }
-                is ApiResult.Rejected -> { queue.delete(item); dropped++; error = r.message }
+                is ApiResult.Rejected -> {
+                    // A 4xx on a lesson request (e.g. topic validation) will never succeed: drop it,
+                    // but tell the learner why.
+                    Log.w(TAG, "Lesson request rejected (${r.code}): ${r.message}")
+                    queue.delete(item); dropped++; requestErrors += r.message; error = r.message
+                }
             }
         }
 
@@ -189,10 +164,21 @@ class LearnerSyncManager @Inject constructor(
                     // The server named none of them: stop rather than spin on the same batch.
                     if (handled.isEmpty()) { valid.forEach { queue.incrementRetry(it.first.id) }; error = "Server resolved no events"; break }
                 }
-                is ApiResult.Unauthorized -> return SyncReport(SyncStatus.UNAUTHORIZED, downloaded, resolved, dropped, r.message)
+                is ApiResult.Unauthorized -> return SyncReport(SyncStatus.UNAUTHORIZED, downloaded, resolved, dropped, r.message, requestErrors)
                 is ApiResult.Retryable -> { valid.forEach { queue.incrementRetry(it.first.id) }; error = r.message; break }
-                // A whole-batch 4xx will never succeed; keep going rather than wedge the queue behind it.
-                is ApiResult.Rejected -> { valid.forEach { queue.delete(it.first) }; dropped += valid.size; error = r.message }
+                // Per-event rejections arrive inside a 200 (data.rejected). A whole-request 4xx means
+                // the request was wrong (client bug, version skew, unenrolled course), not the events,
+                // so never delete progress for it: keep the rows, count a retry, and give up only
+                // after MAX_RETRIES.
+                is ApiResult.Rejected -> {
+                    Log.w(TAG, "Events batch rejected (${r.code}): ${r.message}")
+                    for ((item, _) in valid) {
+                        if (item.retryCount >= MAX_RETRIES) { queue.delete(item); dropped++ }
+                        else queue.incrementRetry(item.id)
+                    }
+                    error = r.message
+                    break
+                }
             }
         }
 
@@ -202,13 +188,13 @@ class LearnerSyncManager @Inject constructor(
                 progress.saveMe(me.value)
                 downloaded += fetchMissingBundles(me.value)
             }
-            is ApiResult.Unauthorized -> return SyncReport(SyncStatus.UNAUTHORIZED, downloaded, resolved, dropped, me.message)
+            is ApiResult.Unauthorized -> return SyncReport(SyncStatus.UNAUTHORIZED, downloaded, resolved, dropped, me.message, requestErrors)
             is ApiResult.Retryable -> error = error ?: me.message
             is ApiResult.Rejected -> Log.w(TAG, "getMe rejected: ${me.message}")
         }
 
         val status = if (error != null && downloaded == 0 && resolved == 0) SyncStatus.ERROR else SyncStatus.SYNCED
-        return SyncReport(status, downloaded, resolved, dropped, error)
+        return SyncReport(status, downloaded, resolved, dropped, error, requestErrors)
     }
 
     private suspend fun fetchMissingBundles(me: MeResponse): Int {
