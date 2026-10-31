@@ -1,0 +1,33 @@
+diff --git a/packages/messaging/src/index.ts b/packages/messaging/src/index.ts
+index 62f1a9f8..fa72dd3a 100644
+--- a/packages/messaging/src/index.ts
++++ b/packages/messaging/src/index.ts
+@@ -528,13 +528,15 @@ class TwilioProvider {
+     return `whatsapp:${e164}`;
+   }
+ 
+-  private async send(to: string, body: string): Promise<SendResult> {
++  private async send(to: string, body: string, mediaUrl?: string): Promise<SendResult> {
+     try {
+       const params = new URLSearchParams({
+         From: this.from,
+         To: this.formatTo(to),
+-        Body: body,
+       });
++      // Twilio needs a Body or a MediaUrl; an image may go out without a caption.
++      if (body) params.set('Body', body);
++      if (mediaUrl) params.set('MediaUrl', mediaUrl);
+       if (this.statusCallbackUrl) {
+         params.set('StatusCallback', this.statusCallbackUrl);
+       }
+@@ -559,8 +561,8 @@ class TwilioProvider {
+   }
+ 
+   async sendImage(to: string, message: ImageMessage): Promise<SendResult> {
+-    const body = message.caption ? `${message.caption}\n${message.imageUrl}` : message.imageUrl;
+-    return this.send(to, body);
++    // Sent as real media (MediaUrl), not a link in the text body.
++    return this.send(to, message.caption || '', message.imageUrl);
+   }
+ 
+   async sendVideo(to: string, message: VideoMessage): Promise<SendResult> {
