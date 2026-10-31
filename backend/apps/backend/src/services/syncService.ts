@@ -77,12 +77,18 @@ export const MAX_EVENTS_PER_BATCH = 50;
 export const MAX_EVENT_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 /** A 'generating' claim older than this is assumed dead (server timeout is 240 s). */
 export const STALE_CLAIM_SECONDS = 5 * 60;
+/** A running generation refreshes its claim this often (well inside STALE_CLAIM_SECONDS). */
+export const HEARTBEAT_MS = 30_000;
+/** A failed claim can be retried after this long; before that the client sees 409 in_progress. */
+export const FAILED_RETRY_SECONDS = 60;
+/** After this many started generations for one clientRequestId the request is dropped (422). */
+export const MAX_CLAIM_ATTEMPTS = 3;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LANG_RE = /^[a-z]{2,3}(-[A-Za-z]{2,4})?$/;
 const EVENT_TYPES = new Set(['quiz_answered', 'lesson_completed']);
 
-const isUuid = (v: unknown): v is string => typeof v === 'string' && UUID_RE.test(v);
+export const isUuid = (v: unknown): v is string => typeof v === 'string' && UUID_RE.test(v);
 
 function parseOptions(raw: unknown): string[] {
   let value = raw;
@@ -106,13 +112,26 @@ export interface LessonRequestInput {
   clientRequestId: unknown;
 }
 
+export interface RequestLessonOptions {
+  /** A 'generating' claim with no heartbeat for this long is taken over. */
+  staleSeconds?: number;
+  /** How often a running generation refreshes its claim. */
+  heartbeatMs?: number;
+  /** A 'failed' claim cannot be retried before this many seconds have passed. */
+  retryAfterSeconds?: number;
+}
+
 export async function requestLesson(
   db: SyncDb,
   generator: CourseGeneratorLike,
   learner: SyncLearner,
   input: LessonRequestInput,
-  staleSeconds: number = STALE_CLAIM_SECONDS,
+  opts: RequestLessonOptions = {},
 ): Promise<{ courseId: string; bundle: Bundle }> {
+  const staleSeconds = opts.staleSeconds ?? STALE_CLAIM_SECONDS;
+  const heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
+  const retryAfterSeconds = opts.retryAfterSeconds ?? FAILED_RETRY_SECONDS;
+
   const topic = typeof input.topic === 'string' ? input.topic.trim() : '';
   if (topic.length < 2 || topic.length > 120) {
     throw new SyncError(400, 'topic must be 2–120 characters');
@@ -127,34 +146,56 @@ export async function requestLesson(
   const clientRequestId = input.clientRequestId;
 
   // Claim the id before calling Muse. The conflict branch only fires for a claim that
-  // can be taken over (failed, stale, or 'done' whose course was deleted), so two
-  // concurrent calls can never both come back with a row.
+  // can be taken over, so two concurrent calls can never both come back with a row:
+  //  - 'done' whose course was deleted (always retryable),
+  //  - 'failed' for at least retryAfterSeconds, or 'generating' with no heartbeat for
+  //    staleSeconds, both only while fewer than MAX_CLAIM_ATTEMPTS runs have started.
+  // Each takeover bumps `attempt`; that number fences every later write of this run.
   const claim = await db.raw(
     `INSERT INTO sync_lesson_requests (learner_id, client_request_id, status)
      VALUES ($1, $2, 'generating')
      ON CONFLICT (learner_id, client_request_id) DO UPDATE
-       SET status = 'generating', course_id = NULL, created_at = NOW(), updated_at = NOW()
-       WHERE sync_lesson_requests.status = 'failed'
-          OR (sync_lesson_requests.status = 'done' AND sync_lesson_requests.course_id IS NULL)
-          OR (sync_lesson_requests.status = 'generating'
-              AND sync_lesson_requests.updated_at < NOW() - make_interval(secs => $3))
-     RETURNING status`,
-    [learner.id, clientRequestId, staleSeconds],
+       SET status = 'generating', course_id = NULL,
+           attempt = sync_lesson_requests.attempt + 1, created_at = NOW(), updated_at = NOW()
+       WHERE (sync_lesson_requests.status = 'done' AND sync_lesson_requests.course_id IS NULL)
+          OR (sync_lesson_requests.attempt < $4 AND (
+                (sync_lesson_requests.status = 'failed'
+                  AND sync_lesson_requests.updated_at < NOW() - make_interval(secs => $5))
+             OR (sync_lesson_requests.status = 'generating'
+                  AND sync_lesson_requests.updated_at < NOW() - make_interval(secs => $3))))
+     RETURNING attempt`,
+    [learner.id, clientRequestId, staleSeconds, MAX_CLAIM_ATTEMPTS, retryAfterSeconds],
   );
 
   if (!claim.rows.length) {
     const existing = await db.raw(
-      `SELECT status, course_id FROM sync_lesson_requests
-       WHERE learner_id = $1 AND client_request_id = $2`,
-      [learner.id, clientRequestId],
+      `SELECT status, course_id, attempt,
+              (updated_at < NOW() - make_interval(secs => $3)) AS stale
+       FROM sync_lesson_requests WHERE learner_id = $1 AND client_request_id = $2`,
+      [learner.id, clientRequestId, staleSeconds],
     );
     const row = existing.rows[0];
     if (row?.status === 'done' && row.course_id) {
       await enroll(db, learner.id, row.course_id);
       return { courseId: row.course_id, bundle: await buildBundle(db, learner, row.course_id) };
     }
+    // Out of attempts: tell the client to drop the request instead of looping on Muse.
+    if (row && row.attempt >= MAX_CLAIM_ATTEMPTS && (row.status === 'failed' || (row.status === 'generating' && row.stale))) {
+      throw new SyncError(422, 'generation_failed');
+    }
     throw new SyncError(409, 'in_progress');
   }
+  const attempt: number = claim.rows[0].attempt;
+
+  // A generation can outlive staleSeconds (3 tries × 240 s); keep the claim fresh while we work.
+  const heartbeat = setInterval(() => {
+    db.raw(
+      `UPDATE sync_lesson_requests SET updated_at = NOW()
+       WHERE learner_id = $1 AND client_request_id = $2 AND attempt = $3 AND status = 'generating'`,
+      [learner.id, clientRequestId, attempt],
+    ).catch(() => undefined);
+  }, heartbeatMs);
+  heartbeat.unref?.();
 
   let courseId: string;
   try {
@@ -167,23 +208,30 @@ export async function requestLesson(
       force: true,
     });
     courseId = course.id;
-    await enroll(db, learner.id, courseId);
   } catch (err) {
+    clearInterval(heartbeat);
     await db
       .raw(
         `UPDATE sync_lesson_requests SET status = 'failed', updated_at = NOW()
-         WHERE learner_id = $1 AND client_request_id = $2`,
-        [learner.id, clientRequestId],
+         WHERE learner_id = $1 AND client_request_id = $2 AND attempt = $3 AND status = 'generating'`,
+        [learner.id, clientRequestId, attempt],
       )
       .catch(() => undefined);
     throw err instanceof SyncError ? err : new SyncError(502, 'lesson_generation_failed');
   }
+  clearInterval(heartbeat);
 
-  await db.raw(
+  // Only the run that still holds the claim may finish it or enroll the learner. A run that
+  // was taken over (or whose claim was reset) must not mark it done or hand out its course.
+  const done = await db.raw(
     `UPDATE sync_lesson_requests SET status = 'done', course_id = $3, updated_at = NOW()
-     WHERE learner_id = $1 AND client_request_id = $2`,
-    [learner.id, clientRequestId, courseId],
+     WHERE learner_id = $1 AND client_request_id = $2 AND attempt = $4 AND status = 'generating'
+     RETURNING attempt`,
+    [learner.id, clientRequestId, courseId, attempt],
   );
+  if (!done.rows.length) throw new SyncError(409, 'in_progress');
+
+  await enroll(db, learner.id, courseId);
   return { courseId, bundle: await buildBundle(db, learner, courseId) };
 }
 

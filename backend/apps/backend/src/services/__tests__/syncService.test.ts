@@ -26,7 +26,7 @@ const Q1 = '00000000-0000-4000-8000-0000000000e1';
 const Q2 = '00000000-0000-4000-8000-0000000000e2';
 const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 
-interface Req { status: string; course_id: string | null; updatedAt: number }
+interface Req { status: string; course_id: string | null; updatedAt: number; attempt: number }
 
 function makeDb(opts: { authored?: boolean; enrolled?: boolean; otherOrg?: boolean } = {}) {
   const enrolled = opts.enrolled ?? true;
@@ -65,28 +65,39 @@ function makeDb(opts: { authored?: boolean; enrolled?: boolean; otherOrg?: boole
       if (has('INSERT INTO sync_lesson_requests')) {
         const key = `${p[0]}|${p[1]}`;
         const cur = requests.get(key);
+        const [, , staleSecs, maxAttempts, retrySecs] = p;
         const takeover = cur && (
-          cur.status === 'failed' ||
           (cur.status === 'done' && !cur.course_id) ||
-          (cur.status === 'generating' && clock - cur.updatedAt > p[2] * 1000));
+          (cur.attempt < maxAttempts && (
+            (cur.status === 'failed' && clock - cur.updatedAt > retrySecs * 1000) ||
+            (cur.status === 'generating' && clock - cur.updatedAt > staleSecs * 1000))));
         if (!cur || takeover) {
-          requests.set(key, { status: 'generating', course_id: null, updatedAt: clock });
-          return { rows: [{ status: 'generating' }], rowCount: 1 };
+          const attempt = cur ? cur.attempt + 1 : 1;
+          requests.set(key, { status: 'generating', course_id: null, updatedAt: clock, attempt });
+          return { rows: [{ attempt }], rowCount: 1 };
         }
         return { rows: [], rowCount: 0 };
       }
-      if (has('SELECT status, course_id FROM sync_lesson_requests')) {
+      if (has('SELECT status, course_id, attempt')) {
         const cur = requests.get(`${p[0]}|${p[1]}`);
-        return { rows: cur ? [{ status: cur.status, course_id: cur.course_id }] : [] };
+        return { rows: cur ? [{ status: cur.status, course_id: cur.course_id, attempt: cur.attempt,
+          stale: clock - cur.updatedAt > p[2] * 1000 }] : [] };
+      }
+      if (has("UPDATE sync_lesson_requests SET updated_at = NOW()")) {
+        const r = requests.get(`${p[0]}|${p[1]}`);
+        if (r && r.attempt === p[2] && r.status === 'generating') r.updatedAt = clock;
+        return { rows: [] };
       }
       if (has("UPDATE sync_lesson_requests SET status = 'failed'")) {
-        requests.get(`${p[0]}|${p[1]}`)!.status = 'failed';
+        const r = requests.get(`${p[0]}|${p[1]}`)!;
+        if (r.attempt === p[2] && r.status === 'generating') { r.status = 'failed'; r.updatedAt = clock; }
         return { rows: [] };
       }
       if (has("UPDATE sync_lesson_requests SET status = 'done'")) {
         const r = requests.get(`${p[0]}|${p[1]}`)!;
-        r.status = 'done'; r.course_id = p[2];
-        return { rows: [] };
+        if (r.attempt !== p[3] || r.status !== 'generating') return { rows: [] };
+        r.status = 'done'; r.course_id = p[2]; r.updatedAt = clock;
+        return { rows: [{ attempt: r.attempt }] };
       }
       if (has('INSERT INTO enrollments')) { calls.enrollInserts++; return { rows: [] }; }
       if (has('FROM enrollments e JOIN courses c')) {
@@ -188,7 +199,7 @@ test('request: in-flight id returns 409 in_progress and never starts a second ge
 
 test('request: a stale generating claim is re-claimed and generated again', async () => {
   const db = makeDb(); const id = rid();
-  db.requests.set(`${LEARNER.id}|${id}`, { status: 'generating', course_id: null, updatedAt: Date.now() });
+  db.requests.set(`${LEARNER.id}|${id}`, { status: 'generating', course_id: null, updatedAt: Date.now(), attempt: 1 });
   const gen = makeGenerator();
 
   // Fresh claim: still in progress.
@@ -208,6 +219,7 @@ test('request: generation failure marks the claim failed (5xx) and a retry gener
     (e: any) => e instanceof SyncError && e.status >= 500);
   assert.equal(db.requests.get(`${LEARNER.id}|${id}`)!.status, 'failed');
 
+  db.advance(61_000);
   const gen = makeGenerator();
   const res = await requestLesson(db, gen, LEARNER, input(id));
   assert.equal(res.courseId, COURSE);
@@ -225,6 +237,84 @@ test('request: validates topic, language and clientRequestId (400)', async () =>
     await assert.rejects(requestLesson(db, gen, LEARNER, bad), (e: any) => e instanceof SyncError && e.status === 400);
   }
   assert.equal(gen.calls.length, 0);
+});
+
+// ── claim fencing, heartbeat, retry cap ────────────────────────────────────
+
+function slowGenerator() {
+  const calls: any[] = [];
+  let release!: () => void;
+  const gen: CourseGeneratorLike & { calls: any[]; release: () => void } = {
+    calls,
+    release: () => release(),
+    generate: (params) => { calls.push(params); return new Promise((r) => { release = () => r({ id: COURSE }); }); },
+  };
+  return gen;
+}
+const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+
+test('request: a superseded run cannot mark the claim done or enroll the learner', async () => {
+  const db = makeDb(); const id = rid();
+  const a = slowGenerator();
+  // heartbeat effectively off, so the claim goes stale while A is still running
+  const runA = requestLesson(db, a, LEARNER, input(id), { heartbeatMs: 3_600_000 });
+  const outcomeA = runA.then(() => 'ok', (e) => e);
+  await tick();
+
+  db.advance(6 * 60 * 1000);
+  const b = makeGenerator();
+  const resB = await requestLesson(db, b, LEARNER, input(id));
+  assert.equal(resB.courseId, COURSE);
+  assert.equal(db.requests.get(`${LEARNER.id}|${id}`)!.attempt, 2);
+  const enrollsAfterB = db.calls.enrollInserts;
+
+  a.release();
+  const e: any = await outcomeA;
+  assert.ok(e instanceof SyncError && e.status === 409 && e.message === 'in_progress');
+  assert.equal(db.calls.enrollInserts, enrollsAfterB); // A did not enroll
+  assert.equal(db.requests.get(`${LEARNER.id}|${id}`)!.status, 'done');
+});
+
+test('request: a running generation refreshes its claim, so it is not taken over', async () => {
+  const db = makeDb(); const id = rid();
+  const a = slowGenerator();
+  const runA = requestLesson(db, a, LEARNER, input(id), { heartbeatMs: 5 });
+  await tick(20);
+  db.advance(6 * 60 * 1000);
+  await tick(30); // heartbeat runs with the advanced clock
+
+  const b = makeGenerator();
+  await assert.rejects(requestLesson(db, b, LEARNER, input(id)), (e: any) => e.status === 409);
+  assert.equal(b.calls.length, 0);
+
+  a.release();
+  await runA;
+});
+
+test('request: a failed claim cannot be retried for 60 s (409), then can', async () => {
+  const db = makeDb(); const id = rid();
+  await assert.rejects(requestLesson(db, makeGenerator(true), LEARNER, input(id)), (e: any) => e.status === 502);
+
+  const gen = makeGenerator();
+  db.advance(30_000);
+  await assert.rejects(requestLesson(db, gen, LEARNER, input(id)),
+    (e: any) => e.status === 409 && e.message === 'in_progress');
+  assert.equal(gen.calls.length, 0);
+
+  db.advance(31_000);
+  assert.equal((await requestLesson(db, gen, LEARNER, input(id))).courseId, COURSE);
+});
+
+test('request: after 3 failed attempts the request is dropped with 422 generation_failed', async () => {
+  const db = makeDb(); const id = rid(); const gen = makeGenerator(true);
+  for (let i = 0; i < 3; i++) {
+    await assert.rejects(requestLesson(db, gen, LEARNER, input(id)), (e: any) => e.status === 502);
+    db.advance(61_000);
+  }
+  assert.equal(gen.calls.length, 3);
+  await assert.rejects(requestLesson(db, gen, LEARNER, input(id)),
+    (e: any) => e instanceof SyncError && e.status === 422 && e.message === 'generation_failed');
+  assert.equal(gen.calls.length, 3); // no fourth Muse run
 });
 
 // ── bundle ─────────────────────────────────────────────────────────────────
