@@ -90,3 +90,40 @@ test('delete: runs as ONE statement, so it is all-or-nothing', async () => {
     assert.match(seen[0], new RegExp(`DELETE FROM ${table}`), table);
   }
 });
+
+test('delete: also removes AI-generated courses only this learner was in; shared and authored courses stay', async () => {
+  const { db, base, as } = await startApp([
+    { phone: '919876543210', whatsapp_id: '919876543210', name: 'Asha' },
+    { phone: '919000000001', whatsapp_id: '919000000001', name: 'Other' },
+  ]);
+  const [asha, other] = db.learners;
+  const course = (id: string, over: object = {}) => ({ id, title: id, source: 'ai_generated', fsm_definition_id: null, settings: { aiGenerated: true }, ...over });
+  db.courses.push(
+    course('solo-ai'),
+    course('solo-generator', { settings: { generator: { provider: 'meta', model: 'm' } } }),
+    course('shared-ai'),
+    course('authored', { source: 'authored' }),
+    course('fsm-linked', { fsm_definition_id: 'f1' }),
+    course('manual', { settings: {} }),
+    course('others-only'),
+  );
+  for (const id of ['solo-ai', 'solo-generator', 'shared-ai', 'authored', 'fsm-linked', 'manual']) db.enrollments.push({ learner_id: asha.id, course_id: id });
+  db.enrollments.push({ learner_id: other.id, course_id: 'shared-ai' }, { learner_id: other.id, course_id: 'others-only' });
+
+  assert.equal((await fetch(`${base}/me`, { method: 'DELETE', headers: as(tokenFor(asha)) })).status, 200);
+  assert.deepEqual(db.courses.map((c) => c.id).sort(), ['authored', 'fsm-linked', 'manual', 'others-only', 'shared-ai']);
+  assert.deepEqual(db.enrollments.map((e) => `${e.learner_id === other.id ? 'other' : 'asha'}:${e.course_id}`).sort(),
+    ['other:others-only', 'other:shared-ai']);
+});
+
+test('delete: the orphaned-course cleanup is part of the same single statement', async () => {
+  const { db, base, as } = await startApp([{ phone: '919876543210', name: 'Asha' }]);
+  const statements: string[] = [];
+  const raw = db.raw.bind(db);
+  db.raw = async (sql: string, p?: any[]) => { if (/DELETE FROM courses/.test(sql)) statements.push(sql); return raw(sql, p); };
+  await fetch(`${base}/me`, { method: 'DELETE', headers: as(tokenFor(db.learners[0])) });
+  assert.equal(statements.length, 1);
+  assert.match(statements[0], /DELETE FROM learners/, 'courses and learner are deleted by the one statement');
+  assert.match(statements[0], /aiGenerated/);
+  assert.match(statements[0], /source <> 'authored'/);
+});
