@@ -1,0 +1,127 @@
+diff --git a/app/src/main/java/org/ekatra/alfred/tools/PromptFormatter.kt b/app/src/main/java/org/ekatra/alfred/tools/PromptFormatter.kt
+index 7eefa31..9ce6f24 100644
+--- a/app/src/main/java/org/ekatra/alfred/tools/PromptFormatter.kt
++++ b/app/src/main/java/org/ekatra/alfred/tools/PromptFormatter.kt
+@@ -11,6 +11,7 @@ import org.ekatra.alfred.data.model.ChatMessageEntity
+  *   • Qwen (ChatML: `<|im_start|>` / `<|im_end|>`)
+  *   • Phi-3  (`<|user|>` / `<|assistant|>`)
+  *   • Llama / TinyLlama (`[INST]` / `[/INST]`)
++ *   • Llama 3.x (`<|start_header_id|>` / `<|eot_id|>`)
+  *   • Gemma 3 (`<start_of_turn>` / `<end_of_turn>`)
+  *
+  * The formatter is **stateless** — call [format] with the model id,
+@@ -39,6 +40,7 @@ class PromptFormatter {
+     ): String = when {
+         modelId.startsWith("qwen")      -> formatQwen(system, historyTurns, userMessage)
+         modelId.startsWith("phi")       -> formatPhi(system, historyTurns, userMessage)
++        modelId.startsWith("llama-3")   -> formatLlama3(system, historyTurns, userMessage)
+         modelId.startsWith("tinyllama") -> formatLlama(system, historyTurns, userMessage)
+         // Gemma 4 changed turn markers; it must be matched before the Gemma 3 branch.
+         modelId.startsWith("gemma-4")   -> formatGemma4(system, historyTurns, userMessage)
+@@ -152,6 +154,24 @@ class PromptFormatter {
+         append("<|channel>thought\n<channel|>")
+     }
+ 
++    // ---- Llama 3.x ----
++    // No <|begin_of_text|>: the JNI layer adds BOS itself, so emitting it here would double it.
++    // <|eot_id|> ends generation natively in the engine.
++    private fun formatLlama3(
++        system: String,
++        history: List<ChatMessageEntity>,
++        userMessage: String
++    ): String = buildString {
++        fun turn(role: String, text: String) {
++            append("<|start_header_id|>").append(role).append("<|end_header_id|>\n\n")
++            append(text).append("<|eot_id|>")
++        }
++        if (system.isNotBlank()) turn("system", system.trim())
++        for (msg in history) turn(if (msg.isUser) "user" else "assistant", msg.text)
++        turn("user", userMessage)
++        append("<|start_header_id|>assistant<|end_header_id|>\n\n")
++    }
++
+     // ---- Llama / TinyLlama ----
+     private fun formatLlama(
+         system: String,
+diff --git a/app/src/maya/java/org/ekatra/alfred/persona/ActivePersona.kt b/app/src/maya/java/org/ekatra/alfred/persona/ActivePersona.kt
+index dbbcf11..ac88a5f 100644
+--- a/app/src/maya/java/org/ekatra/alfred/persona/ActivePersona.kt
++++ b/app/src/maya/java/org/ekatra/alfred/persona/ActivePersona.kt
+@@ -79,6 +79,18 @@ Rules:
+     override val subjectSuggestions = listOf("Math", "Science", "English", "History", "Geography", "Coding")
+ 
+     override val models = listOf(
++        // Meta Llama 3.2 1B Instruct (bartowski quant), the on-device model for offline lesson feedback.
++        // Llama 3.2 Community License: the app must show "Built with Llama" (see LessonsActivity).
++        ModelConfig(
++            id = "llama-3.2-1b-instruct",
++            name = "Llama 3.2 1B Instruct",
++            description = "Meta Llama 3.2 1B; explains lesson answers offline. Built with Llama.",
++            url = "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/067b946cf014b7c697f3654f621d577a3e3afd1c/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
++            filename = "llama-3.2-1b-instruct-q4_k_m.gguf",
++            expectedSha256 = "6f85a640a97cf2bf5b8e764087b1e83da0fdb51d7c9fab7d0fece9385611df83",
++            sizeInMB = 808,
++            minRamGB = 2
++        ),
+         // Maya installs downloaded Gemma from unsloth; the hash must match that exact file.
+         ModelConfig(
+             id = "gemma-3-1b-it",
+@@ -94,6 +106,6 @@ Rules:
+     // gemma-4-e2b-it is not auto-selected: on device every reply was cut at the "<channel|>" token
+     // (LlamaEngine stops on any token containing "|>"), so users saw only the thinking text, and
+     // it ran at 0.7-2.5 tok/s. Re-enabling it needs an engine fix and a device test first.
+-    override val modelPreference = listOf("lfm2.5-1.2b-instruct", "gemma-3-1b-it")
++    override val modelPreference = listOf("llama-3.2-1b-instruct", "lfm2.5-1.2b-instruct", "gemma-3-1b-it")
+     override val modelLoadFallbacks = emptyMap<String, String>()
+ }
+diff --git a/app/src/test/java/org/ekatra/alfred/data/ModelTierTest.kt b/app/src/test/java/org/ekatra/alfred/data/ModelTierTest.kt
+index 30bb538..384630f 100644
+--- a/app/src/test/java/org/ekatra/alfred/data/ModelTierTest.kt
++++ b/app/src/test/java/org/ekatra/alfred/data/ModelTierTest.kt
+@@ -31,7 +31,9 @@ class ModelTierTest {
+     fun `mid-RAM phones skip models that do not fit`() {
+         val pick = AvailableModels.getDefaultModel(4)
+         assert(pick.minRamGB <= 4) { "picked ${pick.id} needing ${pick.minRamGB}GB" }
+-        assertEquals("lfm2.5-1.2b-instruct", pick.id)
++        val expected = ActivePersona.modelPreference.mapNotNull { AvailableModels.getModelById(it) }
++            .first { it.minRamGB <= 4 }
++        assertEquals(expected.id, pick.id)
+     }
+ 
+     @Test
+diff --git a/app/src/test/java/org/ekatra/alfred/tools/PromptFormatterTest.kt b/app/src/test/java/org/ekatra/alfred/tools/PromptFormatterTest.kt
+index 741391b..0336561 100644
+--- a/app/src/test/java/org/ekatra/alfred/tools/PromptFormatterTest.kt
++++ b/app/src/test/java/org/ekatra/alfred/tools/PromptFormatterTest.kt
+@@ -36,4 +36,31 @@ class PromptFormatterTest {
+         assertTrue(p.startsWith("<|im_start|>system\nSYS"))
+         assertTrue(p.endsWith("<|im_start|>assistant\n"))
+     }
++
++    @Test
++    fun `llama 3 uses header ids with no begin_of_text and an open assistant header`() {
++        val p = formatter.format("llama-3.2-1b-instruct", "SYS", history, "Q")
++        assertEquals(
++            "<|start_header_id|>system<|end_header_id|>\n\nSYS<|eot_id|>" +
++                "<|start_header_id|>user<|end_header_id|>\n\nhi<|eot_id|>" +
++                "<|start_header_id|>assistant<|end_header_id|>\n\nhello<|eot_id|>" +
++                "<|start_header_id|>user<|end_header_id|>\n\nQ<|eot_id|>" +
++                "<|start_header_id|>assistant<|end_header_id|>\n\n",
++            p
++        )
++        // The JNI adds BOS; a literal one here would double it.
++        assertFalse(p.contains("<|begin_of_text|>"))
++        assertFalse(p.contains("<|im_start|>"))
++    }
++
++    @Test
++    fun `llama 3 skips an empty system turn`() {
++        val p = formatter.format("llama-3.2-1b-instruct", " ", emptyList(), "Q")
++        assertTrue(p.startsWith("<|start_header_id|>user<|end_header_id|>"))
++    }
++
++    @Test
++    fun `tinyllama still uses INST format`() {
++        assertTrue(formatter.format("tinyllama", "SYS", emptyList(), "Q").startsWith("[INST]"))
++    }
+ }
