@@ -48,8 +48,16 @@ class LearnerSyncManager @Inject constructor(
     private val bundles: LessonStore,
     private val progress: LessonProgressStore,
     private val config: SyncConfig,
-    private val connectivity: Connectivity
+    private val connectivity: Connectivity,
+    private val refresher: TokenRefresher,
+    private val localData: LocalLearnerData
 ) {
+    /** For tests and callers that have no Firebase user to exchange: tokens come from config alone. */
+    internal constructor(
+        api: LearnerSyncApi, queue: SyncQueueDao, bundles: LessonStore, progress: LessonProgressStore,
+        config: SyncConfig, connectivity: Connectivity
+    ) : this(api, queue, bundles, progress, config, connectivity, NoTokenRefresher, LocalLearnerData(queue, bundles, progress))
+
     companion object {
         private const val TAG = "LearnerSync"
         const val TYPE_LEARNER_EVENT = "learner_event"
@@ -167,7 +175,7 @@ class LearnerSyncManager @Inject constructor(
 
     fun dismissFailedRequest(clientRequestId: String) = progress.removeFailedRequest(clientRequestId)
 
-    // ---- tester sign-in ----
+    // ---- learner token ----
 
     /** Forget the stored token and everything it fetched or queued (Firebase sign-out). */
     suspend fun signOut() {
@@ -178,26 +186,26 @@ class LearnerSyncManager @Inject constructor(
 
     /** Downloaded lessons and their images, local progress, and the unsynced learner rows (not analytics). */
     suspend fun clearLocalLearnerData() {
-        queue.deleteByType(TYPE_LEARNER_EVENT)
-        queue.deleteByType(TYPE_LESSON_REQUEST)
-        withContext(ioDispatcher) {
-            bundles.clear()
-            progress.clear()
-        }
+        localData.clear()
         missingImageUrls.clear()
         refetchedVersion.clear()
     }
 
+    /** Make sure a token is stored if one can be had (exchange after a Firebase sign-in, or near expiry). */
+    suspend fun ensureToken(): Boolean {
+        val ok = refresher.ensureToken()
+        if (ok && _status.value == SyncStatus.NOT_CONFIGURED) _status.value = SyncStatus.IDLE
+        return ok
+    }
+
     /**
-     * A 401 with a token this tester joined with means it expired: drop it so the join form shows again.
-     * The queue and lessons stay, so the same person rejoining loses nothing. A build-time token is left alone;
-     * it keeps the "sign-in expired" behaviour.
+     * A 401 that a fresh exchange did not fix. A stored token is dropped (it is useless, and the next
+     * [ensureToken] will exchange again if Firebase still has a user); the queue and lessons stay. A
+     * build-time token is left alone and keeps the "sign-in expired" behaviour.
      */
     private fun onUnauthorized() {
-        if (config.hasStoredToken) {
-            config.clearToken()
-            _status.value = SyncStatus.NOT_CONFIGURED
-        }
+        if (config.hasStoredToken) config.clearToken()
+        _status.value = if (config.isConfigured) SyncStatus.UNAUTHORIZED else SyncStatus.NOT_CONFIGURED
     }
 
     // ---- sync ----
@@ -216,20 +224,33 @@ class LearnerSyncManager @Inject constructor(
      * Neither step overlaps itself.
      */
     suspend fun sync(): SyncReport {
+        // A Firebase user with no token yet, or a token near expiry, gets exchanged here (online only).
+        if (connectivity.isOnline()) refresher.ensureToken()
         if (!config.isConfigured) return SyncReport(SyncStatus.NOT_CONFIGURED).also { _status.value = it.status }
         if (!connectivity.isOnline()) return SyncReport(SyncStatus.OFFLINE).also { _status.value = it.status }
 
+        val first = syncPass()
+        if (first.status != SyncStatus.UNAUTHORIZED) return first
+        // The server refused the token. Try once with a freshly exchanged one before giving up.
+        if (refresher.refreshAfter401()) {
+            val second = syncPass()
+            if (second.status != SyncStatus.UNAUTHORIZED) return second
+        }
+        onUnauthorized()
+        return first
+    }
+
+    private suspend fun syncPass(): SyncReport {
         val events = eventsLock.withLock {
             _status.value = SyncStatus.RUNNING
             withContext(ioDispatcher) { syncEvents() }
         }
-        events.stop?.let { _status.value = it.status; onUnauthorized(); return it }
+        events.stop?.let { _status.value = it.status; return it }
         // Events are done: the chip can say Synced now, whatever generation below takes.
         _status.value = if (events.error != null && events.resolved == 0) SyncStatus.ERROR else SyncStatus.SYNCED
 
         val report = generationLock.withLock { withContext(ioDispatcher) { syncLessons(events) } }
         if (report.status == SyncStatus.UNAUTHORIZED || report.status == SyncStatus.ERROR) _status.value = report.status
-        if (report.status == SyncStatus.UNAUTHORIZED) onUnauthorized()
         return report
     }
 
@@ -425,4 +446,10 @@ class LearnerSyncManager @Inject constructor(
     private fun parseEvent(item: SyncQueueItem): LearnerEvent? =
         runCatching { gson.fromJson(item.payload, LearnerEvent::class.java) }.getOrNull()
             ?.takeIf { !it.clientEventId.isNullOrBlank() && !it.type.isNullOrBlank() }
+}
+
+/** No Firebase user to exchange: the token, if any, is whatever [SyncConfig] already holds. */
+internal object NoTokenRefresher : TokenRefresher {
+    override suspend fun ensureToken(): Boolean = false
+    override suspend fun refreshAfter401(): Boolean = false
 }

@@ -32,6 +32,31 @@ sealed interface LessonsScreen {
     data class Lesson(val courseId: String, val lessonId: String, val stage: Stage) : LessonsScreen
 }
 
+/** What the Lessons home shows when there may be no learner token yet. */
+enum class LessonsSignIn {
+    /** A token is in place: ask for lessons as normal. */
+    READY,
+    /** No lessons server on this build. */
+    UNAVAILABLE,
+    /** Nobody is signed in to Maya: offer "Sign in to get lessons". */
+    NEEDS_SIGN_IN,
+    /** Signed in to Maya; the lessons token is being fetched. */
+    GETTING_READY,
+    /** Signed in to Maya, but the token could not be fetched (offline, server down). */
+    FAILED
+}
+
+internal fun lessonsSignInState(
+    configured: Boolean, needsToken: Boolean, hasFirebaseUser: Boolean, gettingReady: Boolean, failed: Boolean
+): LessonsSignIn = when {
+    configured -> LessonsSignIn.READY
+    !needsToken -> LessonsSignIn.UNAVAILABLE
+    gettingReady -> LessonsSignIn.GETTING_READY
+    !hasFirebaseUser -> LessonsSignIn.NEEDS_SIGN_IN
+    failed -> LessonsSignIn.FAILED
+    else -> LessonsSignIn.GETTING_READY // a Firebase user and no token yet: the exchange is about to run
+}
+
 /** State of the "Maya explains" panel under a wrong answer. */
 sealed interface ExplainState {
     data object Idle : ExplainState
@@ -57,6 +82,8 @@ data class LessonsUiState(
     val configured: Boolean = false,
     /** A server is known but there is no token yet. */
     val needsToken: Boolean = false,
+    val signIn: LessonsSignIn = LessonsSignIn.UNAVAILABLE,
+    val signInMessage: String? = null,
     val online: Boolean = true,
     val bundles: List<LessonBundle> = emptyList(),
     val completed: Set<String> = emptySet(),
@@ -91,7 +118,8 @@ class LessonsViewModel @Inject constructor(
     private val locator: ModelLocator,
     private val trigger: SyncTrigger,
     @Named("inference") private val inferenceMutex: Mutex,
-    private val persona: Persona
+    private val persona: Persona,
+    private val firebase: FirebaseSession
 ) : ViewModel() {
 
     companion object {
@@ -101,6 +129,8 @@ class LessonsViewModel @Inject constructor(
         const val LANGUAGE = "en"
         /** Module text handed to the on-device model; the context is only 2048 tokens. */
         const val LESSON_CONTEXT_CHARS = 1200
+        const val OFFLINE_SETUP_MESSAGE = "Connect to the internet once to set up your lessons."
+        const val SETUP_FAILED_MESSAGE = "Couldn't set up your lessons. Please try again."
 
         /** Chat keeps the persona's 120 s; a quiz explanation that takes longer than this is not worth waiting for. */
         const val EXPLAIN_FIRST_TOKEN_MS = 25_000L
@@ -120,6 +150,8 @@ class LessonsViewModel @Inject constructor(
     internal var ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 
     private var explainJob: Job? = null
+    private var gettingReady = false
+    private var setupFailure: String? = null
 
     init {
         viewModelScope.launch { bundleStore.bundles.collect { b -> _ui.update { it.copy(bundles = b) } } }
@@ -147,11 +179,16 @@ class LessonsViewModel @Inject constructor(
         viewModelScope.launch { manager.status.collect { s -> _ui.update { it.copy(syncStatus = s) } } }
         // The token can change under us: a join, a sign-out, or a 401 clearing an expired one.
         viewModelScope.launch { manager.configChanges.collect { refreshConfig() } }
+        refreshConfig()
+        setUpToken()
         viewModelScope.launch {
             // Fires on every reconnect, so queued work goes out within seconds of coming back online.
             var wasOnline: Boolean? = null
             connectivity.onlineFlow().collect { online ->
                 _ui.update { it.copy(online = online) }
+                // Only on a real offline -> online change: the first reading is not a reconnect, and the
+                // setup at start-up has already had its try.
+                if (online && wasOnline == false && !manager.isConfigured) setUpToken()
                 if (online && manager.isConfigured) {
                     // A real offline -> online change also replaces any WorkManager run that is sitting
                     // in retry backoff, in case this screen is closed before the sync below finishes.
@@ -185,8 +222,40 @@ class LessonsViewModel @Inject constructor(
     }
 
     private fun refreshConfig() {
-        _ui.update { it.copy(configured = manager.isConfigured, needsToken = manager.needsToken) }
+        val state = lessonsSignInState(
+            configured = manager.isConfigured, needsToken = manager.needsToken, hasFirebaseUser = firebase.hasUser(),
+            gettingReady = gettingReady, failed = setupFailure != null
+        )
+        _ui.update {
+            it.copy(configured = manager.isConfigured, needsToken = manager.needsToken, signIn = state, signInMessage = setupFailure)
+        }
     }
+
+    // ---- getting a learner token ----
+
+    /**
+     * With no lessons token: if someone is signed in to Maya, exchange silently (online only); if not, the
+     * screen offers "Sign in to get lessons". A stored token keeps lessons working offline, so this never
+     * runs when one is already in place.
+     */
+    private fun setUpToken() {
+        if (manager.isConfigured || !manager.needsToken || gettingReady) return
+        if (!firebase.hasUser()) { refreshConfig(); return }
+        if (!connectivity.isOnline()) { setupFailure = OFFLINE_SETUP_MESSAGE; refreshConfig(); return }
+        gettingReady = true; setupFailure = null; refreshConfig()
+        viewModelScope.launch {
+            val ok = manager.ensureToken()
+            gettingReady = false
+            setupFailure = if (ok) null else SETUP_FAILED_MESSAGE
+            refreshConfig()
+            if (ok) { trigger.enqueue(); runSync() }
+        }
+    }
+
+    fun retrySignIn() = setUpToken()
+
+    /** Back from the sign-in screen: whoever signed in is exchanged for a lessons token. */
+    fun onSignedIn() = setUpToken()
 
     fun dismissNotice() = _ui.update { it.copy(notice = null) }
 

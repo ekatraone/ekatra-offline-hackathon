@@ -3,6 +3,7 @@ package org.ekatra.alfred.lessons
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -274,5 +275,126 @@ class LearnerSyncClientTest {
         val b = (client().fetchBundle("c") as ApiResult.Ok).value
         assertEquals(null, b.course.coverImageUrl)
         assertEquals(null, b.lessons.single().imageUrl)
+    }
+
+    // ---- exchange ----
+
+    private fun exchanger(token: String = "") = testClient(SyncConfig("http://127.0.0.1:${server.localPort}/", token))
+
+    @Test
+    fun `exchange posts the Firebase ID token with no Authorization header and parses the learner jwt`() = runBlocking {
+        responseBody = """{"success":true,"data":{"token":"learner-jwt","learner":{"id":"L1","name":"Asha","phone":"+919876543210","email":null}}}"""
+
+        val r = exchanger(token = "stale-build-token").exchange("firebase-id-token") as ExchangeOutcome.Success
+
+        assertEquals("POST", lastMethod); assertEquals("/api/sync/auth/exchange", lastPath)
+        assertEquals("public endpoint: no bearer token", false, lastAuthPresent)
+        assertTrue(lastBody!!.contains(""""idToken":"firebase-id-token""""))
+        assertEquals("learner-jwt", r.token); assertEquals("L1", r.learnerId); assertEquals("+919876543210", r.phone)
+    }
+
+    @Test
+    fun `exchange works before any token exists, which is when it is used`() = runBlocking {
+        responseBody = """{"success":true,"data":{"token":"t","learner":{"id":"L","email":"a@b.c"}}}"""
+        val r = exchanger(token = "").exchange("x") as ExchangeOutcome.Success
+        assertEquals("a@b.c", r.email)
+    }
+
+    @Test
+    fun `exchange maps 401 to unauthorized and everything else to a failure to retry`() = runBlocking {
+        responseBody = """{"success":false,"error":"invalid token"}"""
+        status = 401
+        assertEquals(ExchangeOutcome.Unauthorized, exchanger().exchange("x"))
+        for (code in listOf(429, 500, 503, 400)) {
+            status = code
+            assertTrue("HTTP $code", exchanger().exchange("x") is ExchangeOutcome.Failed)
+        }
+        status = 200
+        responseBody = """{"success":true,"data":{"learner":{"id":"L"}}}"""
+        assertTrue("no token in a success", exchanger().exchange("x") is ExchangeOutcome.Failed)
+        responseBody = "<html>gateway</html>"
+        assertTrue(exchanger().exchange("x") is ExchangeOutcome.Failed)
+    }
+
+    @Test
+    fun `exchange with a dead server or no address`() = runBlocking {
+        assertEquals(ExchangeOutcome.NotConfigured, testClient(SyncConfig("", "", null)).exchange("x"))
+        val c = exchanger()
+        server.close()
+        assertTrue(c.exchange("x") is ExchangeOutcome.Failed)
+    }
+
+    // ---- whatsapp start ----
+
+    @Test
+    fun `start posts the phone, sends no Authorization header and reads the timings`() = runBlocking {
+        responseBody = """{"success":true,"data":{"resendAfterSeconds":45,"expiresInSeconds":300}}"""
+
+        val r = exchanger(token = "x").whatsappStart("+919876543210") as StartOutcome.Sent
+
+        assertEquals("/api/auth/whatsapp/start", lastPath)
+        assertEquals(false, lastAuthPresent)
+        assertTrue(lastBody!!.contains(""""phone":"+919876543210""""))
+        assertEquals(45, r.resendAfterSeconds); assertEquals(300, r.expiresInSeconds)
+    }
+
+    @Test
+    fun `start falls back to 30 and 600 seconds when the server leaves them out`() = runBlocking {
+        responseBody = """{"success":true,"data":{}}"""
+        val r = exchanger().whatsappStart("+919876543210") as StartOutcome.Sent
+        assertEquals(30, r.resendAfterSeconds); assertEquals(600, r.expiresInSeconds)
+    }
+
+    @Test
+    fun `start error mapping`() = runBlocking {
+        responseBody = """{"success":false,"error":"bad phone"}"""
+        status = 400
+        assertEquals(StartOutcome.BadPhone("bad phone"), exchanger().whatsappStart("+1"))
+        status = 429
+        assertEquals(StartOutcome.RateLimited, exchanger().whatsappStart("+919876543210"))
+        status = 503
+        assertTrue(exchanger().whatsappStart("+919876543210") is StartOutcome.NetworkError)
+        responseBody = "<html>nope</html>"
+        status = 400
+        assertTrue("a proxy page is not our API saying the phone is bad", exchanger().whatsappStart("+919876543210") is StartOutcome.NetworkError)
+        assertEquals(StartOutcome.NotConfigured, testClient(SyncConfig("", "", null)).whatsappStart("+919876543210"))
+    }
+
+    @Test
+    fun `start with a dead server is a network error`() = runBlocking {
+        val c = exchanger()
+        server.close()
+        assertTrue(c.whatsappStart("+919876543210") is StartOutcome.NetworkError)
+    }
+
+    // ---- whatsapp verify ----
+
+    @Test
+    fun `verify posts the phone and code and returns the Firebase custom token`() = runBlocking {
+        responseBody = """{"success":true,"data":{"firebaseCustomToken":"custom.jwt.token"}}"""
+
+        val r = exchanger(token = "x").whatsappVerify("+919876543210", "123456") as VerifyOutcome.Verified
+
+        assertEquals("/api/auth/whatsapp/verify", lastPath)
+        assertEquals(false, lastAuthPresent)
+        assertTrue(lastBody!!.contains(""""phone":"+919876543210"""") && lastBody!!.contains(""""code":"123456""""))
+        assertEquals("custom.jwt.token", r.firebaseCustomToken)
+    }
+
+    @Test
+    fun `verify error mapping`() = runBlocking {
+        responseBody = """{"success":false,"error":"invalid"}"""
+        status = 401
+        assertEquals(VerifyOutcome.WrongCode, exchanger().whatsappVerify("+919876543210", "000000"))
+        status = 429
+        assertEquals(VerifyOutcome.RateLimited, exchanger().whatsappVerify("+919876543210", "000000"))
+        status = 400
+        assertEquals(VerifyOutcome.MalformedCode, exchanger().whatsappVerify("+919876543210", "12"))
+        status = 502
+        assertTrue(exchanger().whatsappVerify("+919876543210", "123456") is VerifyOutcome.NetworkError)
+        status = 200
+        responseBody = """{"success":true,"data":{}}"""
+        assertTrue("no custom token", exchanger().whatsappVerify("+919876543210", "123456") is VerifyOutcome.NetworkError)
+        assertEquals(VerifyOutcome.NotConfigured, testClient(SyncConfig("", "", null)).whatsappVerify("+919876543210", "123456"))
     }
 }

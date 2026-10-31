@@ -20,7 +20,7 @@ class LearnerSyncClient internal constructor(
     // Seam for unit tests: the Firebase Performance plugin rewrites URL.openConnection() in app
     // classes at build time, which cannot run on the JVM. Tests pass their own factory.
     private val openConnection: (URL) -> HttpURLConnection
-) : LearnerSyncApi {
+) : LearnerSyncApi, PhoneAuthApi {
 
     @Inject constructor(config: SyncConfig) : this(config, ::defaultOpen)
 
@@ -30,6 +30,8 @@ class LearnerSyncClient internal constructor(
         /** Writing a lesson takes 60-240 s and the server gives up at 240 s; wait 300 s so we never quit first. */
         const val LESSON_READ_TIMEOUT_MS = 300_000
         const val EVENT_BATCH_LIMIT = 20
+        const val DEFAULT_RESEND_SECONDS = 30
+        const val DEFAULT_EXPIRES_SECONDS = 600
         /** Lesson images are about 150-300 KB; refuse anything absurd rather than fill memory. */
         const val MAX_IMAGE_BYTES = 5 * 1024 * 1024
     }
@@ -141,6 +143,83 @@ class LearnerSyncClient internal constructor(
             ApiResult.Retryable("Bad response: ${e.message}")
         }
     }
+
+    // ---- public auth endpoints: no Authorization header ----
+
+    /** Run a public POST and hand the status and body to [map]; a network failure goes to [onError]. */
+    private suspend fun <R> publicPost(
+        path: String, body: Any, notConfigured: R, onError: (String) -> R, map: (Int, String) -> R
+    ): R = withContext(Dispatchers.IO) {
+        if (config.baseUrl.isBlank()) return@withContext notConfigured
+        try {
+            val raw = send("POST", path, READ_TIMEOUT_MS, body, authenticated = false)
+            map(raw.code, raw.text)
+        } catch (e: IOException) {
+            onError(e.message ?: e.javaClass.simpleName)
+        } catch (e: RuntimeException) {
+            onError("Bad response: ${e.message}")
+        }
+    }
+
+    private class Envelope(val root: com.google.gson.JsonObject?) {
+        /** Only a body with a `success` flag is an answer from our API; a proxy's page is not. */
+        val fromApi: Boolean get() = root?.get("success")?.takeIf { it.isJsonPrimitive } != null
+        val ok: Boolean get() = root?.get("success")?.takeIf { it.isJsonPrimitive }?.asBoolean == true
+        fun error(code: Int): String = root?.get("error")?.takeIf { it.isJsonPrimitive }?.asString ?: "HTTP $code"
+        fun <T> data(type: Class<T>, gson: Gson): T? =
+            root?.get("data")?.takeIf { it.isJsonObject }?.let { runCatching { gson.fromJson(it, type) }.getOrNull() }
+    }
+
+    private fun envelope(text: String) = Envelope(runCatching { JsonParser.parseString(text).asJsonObject }.getOrNull())
+
+    override suspend fun exchange(idToken: String): ExchangeOutcome =
+        publicPost("/api/sync/auth/exchange", mapOf("idToken" to idToken), ExchangeOutcome.NotConfigured,
+            { ExchangeOutcome.Failed(it) }) { code, text ->
+            val env = envelope(text)
+            when {
+                code in 200..299 -> {
+                    val data = env.data(ExchangeResponse::class.java, gson)
+                    if (env.ok && !data?.token.isNullOrBlank()) {
+                        ExchangeOutcome.Success(data!!.token!!, data.learner?.id, data.learner?.name, data.learner?.phone, data.learner?.email)
+                    } else ExchangeOutcome.Failed("Bad response")
+                }
+                code == 401 -> ExchangeOutcome.Unauthorized
+                else -> ExchangeOutcome.Failed(env.error(code))
+            }
+        }
+
+    override suspend fun whatsappStart(phone: String): StartOutcome =
+        publicPost("/api/auth/whatsapp/start", mapOf("phone" to phone), StartOutcome.NotConfigured,
+            { StartOutcome.NetworkError(it) }) { code, text ->
+            val env = envelope(text)
+            when {
+                code in 200..299 -> {
+                    if (!env.ok) StartOutcome.NetworkError("Bad response") else {
+                        val d = env.data(StartResponse::class.java, gson)
+                        StartOutcome.Sent(d?.resendAfterSeconds ?: DEFAULT_RESEND_SECONDS, d?.expiresInSeconds ?: DEFAULT_EXPIRES_SECONDS)
+                    }
+                }
+                code == 429 -> StartOutcome.RateLimited
+                code >= 500 || !env.fromApi -> StartOutcome.NetworkError(env.error(code))
+                else -> StartOutcome.BadPhone(env.error(code))
+            }
+        }
+
+    override suspend fun whatsappVerify(phone: String, code: String): VerifyOutcome =
+        publicPost("/api/auth/whatsapp/verify", mapOf("phone" to phone, "code" to code), VerifyOutcome.NotConfigured,
+            { VerifyOutcome.NetworkError(it) }) { status, text ->
+            val env = envelope(text)
+            when {
+                status in 200..299 -> {
+                    val token = env.data(VerifyResponse::class.java, gson)?.firebaseCustomToken
+                    if (env.ok && !token.isNullOrBlank()) VerifyOutcome.Verified(token) else VerifyOutcome.NetworkError("Bad response")
+                }
+                status == 401 -> VerifyOutcome.WrongCode
+                status == 429 -> VerifyOutcome.RateLimited
+                status >= 500 || !env.fromApi -> VerifyOutcome.NetworkError(env.error(status))
+                else -> VerifyOutcome.MalformedCode
+            }
+        }
 
     private fun <T> interpret(code: Int, text: String, type: Class<T>): ApiResult<T> {
         val root = runCatching { JsonParser.parseString(text).asJsonObject }.getOrNull()

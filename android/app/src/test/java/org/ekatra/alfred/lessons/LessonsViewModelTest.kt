@@ -33,6 +33,7 @@ class LessonsViewModelTest {
     private lateinit var locator: FakeLocator
     private lateinit var trigger: FakeTrigger
     private val mutex = Mutex()
+    private val firebase = FakeFirebase()
     private val io = CountingDispatcher()
     private lateinit var manager: LearnerSyncManager
     private lateinit var vm: LessonsViewModel
@@ -59,7 +60,7 @@ class LessonsViewModelTest {
         manager = LearnerSyncManager(api, dao, bundles, progress, config, net).also {
             it.ioDispatcher = Dispatchers.Unconfined
         }
-        return LessonsViewModel(manager, bundles, progress, net, engine, locator, trigger, mutex, ActivePersona)
+        return LessonsViewModel(manager, bundles, progress, net, engine, locator, trigger, mutex, ActivePersona, firebase)
             .also { it.ioDispatcher = io; vm = it }
     }
 
@@ -734,5 +735,164 @@ class LessonsViewModelTest {
         bundles.save(sampleBundleWithImages(course, lesson))
         newVm()
         assertEquals(COVER_URL, vm.findCourse(course)?.coverImageUrl)
+    }
+
+    // ---- getting a learner token ----
+
+    private fun tokenVm(
+        hasUser: Boolean,
+        refresher: FakeRefresher,
+        store: FakeTokenStore = FakeTokenStore(),
+        build: String = "",
+        baseUrl: String = "http://x"
+    ): LessonsViewModel {
+        firebase.user = hasUser
+        val config = SyncConfig(baseUrl, build, store)
+        manager = LearnerSyncManager(api, dao, bundles, progress, config, net, refresher, LocalLearnerData(dao, bundles, progress))
+            .also { it.ioDispatcher = Dispatchers.Unconfined }
+        return LessonsViewModel(manager, bundles, progress, net, engine, locator, trigger, mutex, ActivePersona, firebase)
+            .also { it.ioDispatcher = io; vm = it }
+    }
+
+    @Test
+    fun `nobody signed in offers Sign in to get lessons`() = runTest {
+        val refresher = FakeRefresher(ensure = { error("must not exchange without a user") })
+        tokenVm(hasUser = false, refresher = refresher)
+
+        val ui = vm.uiState.value
+        assertEquals(LessonsSignIn.NEEDS_SIGN_IN, ui.signIn)
+        assertFalse(ui.configured); assertTrue(ui.needsToken)
+        assertEquals(0, refresher.ensureCalls)
+    }
+
+    @Test
+    fun `a signed-in user with no token is exchanged silently and lessons open`() = runTest {
+        val store = FakeTokenStore()
+        val refresher = FakeRefresher(ensure = { store.token = "exchanged"; true })
+
+        tokenVm(hasUser = true, refresher = refresher, store = store)
+
+        assertTrue("the exchange ran", refresher.ensureCalls >= 1)
+        val ui = vm.uiState.value
+        assertEquals(LessonsSignIn.READY, ui.signIn)
+        assertTrue(ui.configured)
+        assertNull(ui.signInMessage)
+        assertTrue("a sync follows", api.meCalls >= 1)
+    }
+
+    @Test
+    fun `while the exchange runs the screen says it is getting lessons ready`() = runTest {
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val store = FakeTokenStore()
+        val refresher = object : TokenRefresher {
+            override suspend fun ensureToken(): Boolean { gate.await(); store.token = "t"; return true }
+            override suspend fun refreshAfter401() = false
+        }
+        firebase.user = true
+        val config = SyncConfig("http://x", "", store)
+        manager = LearnerSyncManager(api, dao, bundles, progress, config, net, refresher, LocalLearnerData(dao, bundles, progress))
+            .also { it.ioDispatcher = Dispatchers.Unconfined }
+        val v = LessonsViewModel(manager, bundles, progress, net, engine, locator, trigger, mutex, ActivePersona, firebase)
+            .also { it.ioDispatcher = io }
+
+        assertEquals(LessonsSignIn.GETTING_READY, v.uiState.value.signIn)
+        gate.complete(Unit)
+        assertEquals(LessonsSignIn.READY, v.uiState.value.signIn)
+    }
+
+    @Test
+    fun `offline with no token says to connect once, and does not try`() = runTest {
+        net.online = false
+        val refresher = FakeRefresher(ensure = { error("no network, no exchange") })
+
+        tokenVm(hasUser = true, refresher = refresher)
+
+        val ui = vm.uiState.value
+        assertEquals(LessonsSignIn.FAILED, ui.signIn)
+        assertEquals(LessonsViewModel.OFFLINE_SETUP_MESSAGE, ui.signInMessage)
+        assertEquals(0, refresher.ensureCalls)
+    }
+
+    @Test
+    fun `coming back online sets the token up`() = runTest {
+        net.online = false
+        val store = FakeTokenStore()
+        val refresher = FakeRefresher(ensure = { store.token = "t"; true })
+        tokenVm(hasUser = true, refresher = refresher, store = store)
+        assertEquals(LessonsSignIn.FAILED, vm.uiState.value.signIn)
+
+        net.online = true
+
+        assertEquals(LessonsSignIn.READY, vm.uiState.value.signIn)
+    }
+
+    @Test
+    fun `a failed exchange can be retried`() = runTest {
+        val store = FakeTokenStore()
+        var attempts = 0
+        val refresher = FakeRefresher(ensure = { if (++attempts == 1) false else { store.token = "t"; true } })
+        tokenVm(hasUser = true, refresher = refresher, store = store)
+        assertEquals(LessonsSignIn.FAILED, vm.uiState.value.signIn)
+        assertEquals(LessonsViewModel.SETUP_FAILED_MESSAGE, vm.uiState.value.signInMessage)
+
+        vm.retrySignIn()
+
+        assertEquals(LessonsSignIn.READY, vm.uiState.value.signIn)
+        assertNull(vm.uiState.value.signInMessage)
+    }
+
+    @Test
+    fun `back from the sign-in screen exchanges the new user`() = runTest {
+        val store = FakeTokenStore()
+        val refresher = FakeRefresher(ensure = { store.token = "t"; true })
+        tokenVm(hasUser = false, refresher = refresher, store = store)
+        assertEquals(LessonsSignIn.NEEDS_SIGN_IN, vm.uiState.value.signIn)
+
+        firebase.user = true       // they signed in on the other screen
+        vm.onSignedIn()
+
+        assertEquals(LessonsSignIn.READY, vm.uiState.value.signIn)
+    }
+
+    @Test
+    fun `a build with no lessons server says so, and a build-time token needs no sign-in`() = runTest {
+        tokenVm(hasUser = false, refresher = FakeRefresher(), baseUrl = "")
+        assertEquals(LessonsSignIn.UNAVAILABLE, vm.uiState.value.signIn)
+
+        tokenVm(hasUser = false, refresher = FakeRefresher(), build = "debug-token")
+        assertEquals(LessonsSignIn.READY, vm.uiState.value.signIn)
+    }
+
+    @Test
+    fun `a stored token keeps lessons working offline`() = runTest {
+        net.online = false
+        val refresher = FakeRefresher(ensure = { true })
+        tokenVm(hasUser = true, refresher = refresher, store = FakeTokenStore(token = fakeJwt(4_000_000_000L)))
+
+        assertEquals(LessonsSignIn.READY, vm.uiState.value.signIn)
+        assertEquals(0, refresher.ensureCalls)
+    }
+
+    @Test
+    fun `the sign-in state table`() {
+        fun st(c: Boolean, n: Boolean, u: Boolean, g: Boolean, f: Boolean) = lessonsSignInState(c, n, u, g, f)
+        assertEquals(LessonsSignIn.READY, st(true, false, false, false, false))
+        assertEquals(LessonsSignIn.UNAVAILABLE, st(false, false, false, false, false))
+        assertEquals(LessonsSignIn.NEEDS_SIGN_IN, st(false, true, false, false, false))
+        assertEquals(LessonsSignIn.GETTING_READY, st(false, true, true, true, false))
+        assertEquals(LessonsSignIn.GETTING_READY, st(false, true, true, false, false))
+        assertEquals(LessonsSignIn.FAILED, st(false, true, true, false, true))
+        assertEquals("busy beats a stale failure", LessonsSignIn.GETTING_READY, st(false, true, true, true, true))
+    }
+
+    @Test
+    fun `a failed first exchange is not silently retried by the first connectivity reading`() = runTest {
+        var attempts = 0
+        val refresher = FakeRefresher(ensure = { attempts++; false })
+
+        tokenVm(hasUser = true, refresher = refresher)
+
+        assertEquals(1, attempts)
+        assertEquals(LessonsSignIn.FAILED, vm.uiState.value.signIn)
     }
 }

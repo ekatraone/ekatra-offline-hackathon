@@ -52,6 +52,9 @@ class FakeApi : LearnerSyncApi {
     }
     var meResult: () -> ApiResult<MeResponse> = { ApiResult.Ok(MeResponse()) }
 
+    var exchangeResult: (String) -> ExchangeOutcome = { ExchangeOutcome.Success("exchanged-jwt", "learner-1", "Asha", "+919876543210", null) }
+    val exchangeCalls = mutableListOf<String>()
+
     var imageResult: (String) -> ApiResult<ByteArray> = { ApiResult.Ok(JPEG_BYTES) }
     val imageCalls = mutableListOf<String>()
     /** When set, requestLesson waits on it: a lesson that is still being generated. */
@@ -72,6 +75,10 @@ class FakeApi : LearnerSyncApi {
         return eventsResult(events)
     }
     override suspend fun getMe(): ApiResult<MeResponse> { meCalls++; return meResult() }
+    override suspend fun exchange(idToken: String): ExchangeOutcome {
+        exchangeCalls += idToken
+        return exchangeResult(idToken)
+    }
     override suspend fun downloadImage(url: String): ApiResult<ByteArray> { imageCalls += url; return imageResult(url) }
 }
 
@@ -188,4 +195,48 @@ class FakePrefs : android.content.SharedPreferences {
         }
         override fun apply() { commit() }
     }
+}
+
+class FakeFirebase(
+    var user: Boolean = true,
+    var idTokens: MutableList<String?> = mutableListOf("id-1"),
+    var customTokenSignIn: Boolean = true
+) : FirebaseSession {
+    val idTokenRequests = mutableListOf<Boolean>()   // forceRefresh flags, in order
+    val customTokens = mutableListOf<String>()
+    var signedOut = false
+    override fun hasUser() = user
+    override suspend fun idToken(forceRefresh: Boolean): String? {
+        idTokenRequests += forceRefresh
+        return if (!user) null else if (idTokens.size > 1) idTokens.removeAt(0) else idTokens.firstOrNull()
+    }
+    override suspend fun signInWithCustomToken(customToken: String): Boolean {
+        customTokens += customToken
+        if (customTokenSignIn) user = true
+        return customTokenSignIn
+    }
+    override fun signOut() { user = false; signedOut = true }
+}
+
+class FakeRefresher(var ensure: () -> Boolean = { false }, var refresh: () -> Boolean = { false }) : TokenRefresher {
+    var ensureCalls = 0
+    var refreshCalls = 0
+    override suspend fun ensureToken(): Boolean { ensureCalls++; return ensure() }
+    override suspend fun refreshAfter401(): Boolean { refreshCalls++; return refresh() }
+}
+
+class FakePhoneAuth : PhoneAuthApi {
+    var startResult: (String) -> StartOutcome = { StartOutcome.Sent(30, 600) }
+    var verifyResult: (String, String) -> VerifyOutcome = { _, _ -> VerifyOutcome.Verified("custom-token") }
+    val starts = mutableListOf<String>()
+    val verifies = mutableListOf<Pair<String, String>>()
+    override suspend fun whatsappStart(phone: String): StartOutcome { starts += phone; return startResult(phone) }
+    override suspend fun whatsappVerify(phone: String, code: String): VerifyOutcome { verifies += phone to code; return verifyResult(phone, code) }
+}
+
+/** A JWT-shaped string with the given `exp` (seconds since the epoch). The signature is junk; the app never checks it. */
+fun fakeJwt(expSeconds: Long?): String {
+    fun b64(s: String) = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(s.toByteArray())
+    val payload = if (expSeconds == null) """{"sub":"x"}""" else """{"sub":"x","exp":$expSeconds}"""
+    return b64("""{"alg":"HS256","typ":"JWT"}""") + "." + b64(payload) + ".sig"
 }

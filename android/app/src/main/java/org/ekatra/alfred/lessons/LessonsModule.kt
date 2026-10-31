@@ -15,6 +15,10 @@ import javax.inject.Singleton
 @InstallIn(SingletonComponent::class)
 abstract class LessonsBindingsModule {
     @Binds abstract fun bindApi(client: LearnerSyncClient): LearnerSyncApi
+    @Binds abstract fun bindPhoneAuthApi(client: LearnerSyncClient): PhoneAuthApi
+    @Binds abstract fun bindFirebaseSession(impl: FirebaseAuthSession): FirebaseSession
+    @Binds abstract fun bindTokenRefresher(impl: LearnerTokenProvider): TokenRefresher
+    @Binds abstract fun bindSessionHooks(impl: LearnerSession): LearnerSessionHooks
     @Binds abstract fun bindConnectivity(impl: AndroidConnectivity): Connectivity
 }
 

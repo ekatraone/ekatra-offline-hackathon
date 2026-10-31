@@ -8,6 +8,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -866,5 +867,190 @@ class LearnerSyncManagerTest {
         manager.sync()
 
         assertEquals(listOf(newCover), api.imageCalls)
+    }
+
+    // ---- learner token: exchange before syncing, re-exchange on 401 ----
+
+    private fun withRefresher(refresher: FakeRefresher, token: String? = null, learner: String? = null, build: String = ""):
+        Triple<LearnerSyncManager, FakeTokenStore, SyncConfig> {
+        val store = FakeTokenStore(token, learner)
+        val config = SyncConfig("http://x", build, store)
+        val m = LearnerSyncManager(api, dao, bundles, progress, config, net, refresher, LocalLearnerData(dao, bundles, progress))
+        return Triple(m, store, config)
+    }
+
+    @Test
+    fun `a sync first makes sure there is a token, and runs once it has one`() = runTest {
+        lateinit var store: FakeTokenStore
+        val refresher = FakeRefresher(ensure = { store.token = "exchanged"; true })
+        val (m, s, _) = withRefresher(refresher)
+        store = s
+        m.enqueueQuizAnswer("c", "l", "q", "A", true)
+        assertFalse(m.isConfigured)
+
+        val report = m.sync()
+
+        assertEquals(1, refresher.ensureCalls)
+        assertEquals(SyncStatus.SYNCED, report.status)
+        assertEquals(1, api.eventBatches.size)
+        assertTrue(m.isConfigured)
+    }
+
+    @Test
+    fun `with no token and nothing to exchange, sync does nothing`() = runTest {
+        val refresher = FakeRefresher(ensure = { false })
+        val (m, _, _) = withRefresher(refresher)
+        m.enqueueQuizAnswer("c", "l", "q", "A", true)
+
+        assertEquals(SyncStatus.NOT_CONFIGURED, m.sync().status)
+
+        assertTrue(api.eventBatches.isEmpty())
+        assertEquals(1, dao.items.size)
+    }
+
+    @Test
+    fun `offline a stored token is used as is and no exchange is attempted`() = runTest {
+        val refresher = FakeRefresher(ensure = { true })
+        val (m, _, _) = withRefresher(refresher, token = "stored")
+        net.online = false
+
+        assertEquals(SyncStatus.OFFLINE, m.sync().status)
+        assertEquals("exchange only runs online", 0, refresher.ensureCalls)
+    }
+
+    @Test
+    fun `a 401 re-exchanges and the sync is retried with the new token`() = runTest {
+        var calls = 0
+        api.eventsResult = { evs ->
+            if (calls++ == 0) ApiResult.Unauthorized("expired") else ApiResult.Ok(EventsResponse(accepted = evs.map { it.clientEventId }))
+        }
+        lateinit var store: FakeTokenStore
+        val refresher = FakeRefresher(refresh = { store.token = "fresh"; true })
+        val (m, s, _) = withRefresher(refresher, token = "stale", learner = "learner-1")
+        store = s
+        m.enqueueQuizAnswer("c", "l", "q", "A", true)
+
+        val report = m.sync()
+
+        assertEquals(1, refresher.refreshCalls)
+        assertEquals(SyncStatus.SYNCED, report.status)
+        assertEquals("the same event was sent again under the fresh token", 2, api.eventBatches.size)
+        assertTrue(dao.items.isEmpty())
+        assertEquals("fresh", store.token)
+        assertEquals(SyncStatus.SYNCED, m.status.value)
+    }
+
+    @Test
+    fun `a 401 that a re-exchange does not fix clears the stored token and keeps the data`() = runTest {
+        api.eventsResult = { ApiResult.Unauthorized("expired") }
+        val refresher = FakeRefresher(refresh = { false })
+        val (m, store, _) = withRefresher(refresher, token = "stale", learner = "learner-1")
+        bundles.save(sampleBundle("course-1", "lesson-1"))
+        m.enqueueQuizAnswer("course-1", "lesson-1", "q1", "B", true)
+
+        val report = m.sync()
+
+        assertEquals(SyncStatus.UNAUTHORIZED, report.status)
+        assertNull(store.token)
+        assertEquals("kept, so the same person signing back in loses nothing", "learner-1", store.learner)
+        assertEquals(1, dao.items.size)
+        assertNotNull(bundles.get("course-1"))
+        assertEquals(SyncStatus.NOT_CONFIGURED, m.status.value)
+        assertTrue(m.needsToken)
+    }
+
+    @Test
+    fun `a second 401 after a successful re-exchange does not loop`() = runTest {
+        api.eventsResult = { ApiResult.Unauthorized("still no") }
+        lateinit var store: FakeTokenStore
+        val refresher = FakeRefresher(refresh = { store.token = "fresh"; true })
+        val (m, s, _) = withRefresher(refresher, token = "stale")
+        store = s
+
+        m.enqueueQuizAnswer("c", "l", "q", "A", true)
+        m.sync()
+
+        assertEquals(1, refresher.refreshCalls)
+        assertEquals(2, api.eventBatches.size)
+        assertNull("the token that failed twice is dropped", store.token)
+    }
+
+    @Test
+    fun `a 401 on a lesson request or on me also re-exchanges`() = runTest {
+        var lessonCalls = 0
+        api.lessonResult = { _, _, _ ->
+            if (lessonCalls++ == 0) ApiResult.Unauthorized("expired") else ApiResult.Ok(RequestLessonResult("course-1", sampleBundle()))
+        }
+        val refresher = FakeRefresher(refresh = { true })
+        val (m, _, _) = withRefresher(refresher, token = "stale")
+        m.enqueueLessonRequest("fractions", "en")
+
+        val report = m.sync()
+
+        assertEquals(1, refresher.refreshCalls)
+        assertEquals(1, report.lessonsDownloaded)
+        assertNotNull(bundles.get("course-1"))
+    }
+
+    @Test
+    fun `a 401 with the build-time token keeps it and reports sign-in expired`() = runTest {
+        api.eventsResult = { ApiResult.Unauthorized("expired") }
+        val refresher = FakeRefresher(refresh = { false })
+        val (m, _, _) = withRefresher(refresher, build = "build-token")
+        m.enqueueQuizAnswer("c", "l", "q", "A", true)
+
+        val report = m.sync()
+
+        assertEquals(SyncStatus.UNAUTHORIZED, report.status)
+        assertEquals(SyncStatus.UNAUTHORIZED, m.status.value)
+        assertTrue("the build token is not ours to clear", m.isConfigured)
+        assertFalse(m.hasStoredToken)
+    }
+
+    // ---- sign-out ----
+
+    @Test
+    fun `signing out clears the token, the learner, the lessons, the progress and the learner queue`() = runTest {
+        val (m, store, _) = withRefresher(FakeRefresher(), token = "tok", learner = "learner-1")
+        bundles.save(sampleBundleWithImages("course-1", "lesson-1"))
+        bundles.writeImage(bundles.coverFile("course-1"), JPEG_BYTES)
+        progress.recordAnswer("course-1", "lesson-1", "q1", "B", true, "t")
+        progress.markCompleted("lesson-1")
+        progress.addFailedRequest(FailedLessonRequest("r1", "topic", "en", "bad"))
+        m.enqueueQuizAnswer("course-1", "lesson-1", "q1", "B", true)
+        m.enqueueLessonRequest("topic", "en")
+        dao.insert(org.ekatra.alfred.data.model.SyncQueueItem(type = "chat_analytics", payload = "{}"))
+
+        m.signOut()
+
+        assertNull(store.token); assertNull(store.learner)
+        assertFalse(m.isConfigured); assertTrue(m.needsToken)
+        assertEquals(SyncStatus.NOT_CONFIGURED, m.status.value)
+        assertTrue(bundles.bundles.value.isEmpty())
+        assertEquals("images go with the lessons", 0, File(dir, "lessons").listFiles()?.size ?: 0)
+        assertTrue(progress.data.answers.isEmpty() && progress.data.completedLessonIds.isEmpty() && progress.data.failedRequests.isEmpty())
+        assertTrue(dao.items.none { it.type == "learner_event" || it.type == "lesson_request" })
+        assertEquals("analytics belong to a different setting", 1, dao.items.count { it.type == "chat_analytics" })
+    }
+
+    @Test
+    fun `after sign out nothing more is sent under the old token`() = runTest {
+        val (m, _, _) = withRefresher(FakeRefresher(), token = "tok")
+        m.enqueueQuizAnswer("c", "l", "q", "A", true)
+        m.signOut()
+
+        assertEquals(SyncStatus.NOT_CONFIGURED, m.sync().status)
+        assertTrue(api.eventBatches.isEmpty() && api.meCalls == 0)
+    }
+
+    @Test
+    fun `signing out of a stored token falls back to the build-time token`() = runTest {
+        val (m, _, _) = withRefresher(FakeRefresher(), token = "stored", learner = "learner-1", build = "build-token")
+
+        m.signOut()
+
+        assertTrue("the build-time token takes over", m.isConfigured)
+        assertFalse(m.hasStoredToken)
+        assertEquals(SyncStatus.IDLE, m.status.value)
     }
 }

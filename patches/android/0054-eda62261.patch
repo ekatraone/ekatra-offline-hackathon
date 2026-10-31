@@ -1,0 +1,407 @@
+diff --git a/app/src/main/java/org/ekatra/alfred/ProfileActivity.kt b/app/src/main/java/org/ekatra/alfred/ProfileActivity.kt
+index f4e040a..2faf909 100644
+--- a/app/src/main/java/org/ekatra/alfred/ProfileActivity.kt
++++ b/app/src/main/java/org/ekatra/alfred/ProfileActivity.kt
+@@ -45,6 +45,9 @@ import org.ekatra.alfred.ui.BackButton
+ import org.ekatra.alfred.ui.PersonaDirection
+ import dagger.hilt.android.AndroidEntryPoint
+ import org.ekatra.alfred.data.ConsentManager
++import org.ekatra.alfred.lessons.WhatsAppState
++import org.ekatra.alfred.lessons.WhatsAppStep
++import org.ekatra.alfred.persona.ActivePersona
+ import org.ekatra.alfred.viewmodel.AuthStep
+ import org.ekatra.alfred.viewmodel.ProfileViewModel
+ import java.io.File
+@@ -64,6 +67,8 @@ class ProfileActivity : ComponentActivity() {
+ 
+     companion object {
+         const val EXTRA_EDIT_PROFILE = "edit_profile"
++        /** Opened from Lessons to sign in: return a result instead of carrying on to the chat. */
++        const val EXTRA_FOR_LESSONS = "for_lessons"
+         private const val TAG = "ProfileActivity"
+     }
+ 
+@@ -77,6 +82,9 @@ class ProfileActivity : ComponentActivity() {
+         }
+ 
+         val isEditMode = intent.getBooleanExtra(EXTRA_EDIT_PROFILE, false)
++        val forLessons = intent.getBooleanExtra(EXTRA_FOR_LESSONS, false)
++        // The WhatsApp option needs the lessons server, which release builds are not given.
++        val whatsAppAvailable = BuildConfig.SYNC_BASE_URL.isNotBlank() && ActivePersona.key == "maya"
+ 
+         setContent {
+             PersonaDirection {
+@@ -111,14 +119,30 @@ class ProfileActivity : ComponentActivity() {
+                                 consentLauncher.launch(Intent(this@ProfileActivity, PrivacyConsentActivity::class.java))
+                             }
+                             ProfileAction.GO_ONWARD -> {
+-                                startActivity(Intent(this@ProfileActivity, ModelDownloadActivity::class.java))
++                                if (forLessons) {
++                                    setResult(RESULT_OK)
++                                } else {
++                                    startActivity(Intent(this@ProfileActivity, ModelDownloadActivity::class.java))
++                                }
+                                 finish()
+                             }
+                             ProfileAction.SHOW_SIGN_IN, ProfileAction.STAY -> Unit
+                         }
+                     }
+ 
+-                    when (uiState.authStep) {
++                    val whatsAppState by viewModel.whatsApp.state.collectAsState()
++                    if (uiState.showWhatsApp) {
++                        WhatsAppSignInScreen(
++                            state = whatsAppState,
++                            onPhoneChange = viewModel.whatsApp::updatePhone,
++                            onSendCode = viewModel.whatsApp::sendCode,
++                            onCodeChange = viewModel.whatsApp::updateCode,
++                            onVerify = viewModel.whatsApp::verify,
++                            onResend = viewModel.whatsApp::resend,
++                            onChangeNumber = viewModel.whatsApp::changeNumber,
++                            onBack = viewModel::closeWhatsApp
++                        )
++                    } else when (uiState.authStep) {
+                         AuthStep.EMAIL_INPUT -> EmailInputScreen(
+                             email = uiState.email,
+                             password = uiState.password,
+@@ -128,7 +152,8 @@ class ProfileActivity : ComponentActivity() {
+                             onPasswordChange = viewModel::updatePassword,
+                             onSignIn = viewModel::signInWithEmail,
+                             onCreateAccount = viewModel::createAccountWithEmail,
+-                            onGoogleSignIn = { launchGoogleSignIn() }
++                            onGoogleSignIn = { launchGoogleSignIn() },
++                            onWhatsApp = if (whatsAppAvailable) viewModel::openWhatsApp else null
+                         )
+                         AuthStep.PROFILE_FORM -> ProfileFormScreen(
+                             name = uiState.name,
+@@ -218,7 +243,9 @@ fun EmailInputScreen(
+     onPasswordChange: (String) -> Unit,
+     onSignIn: () -> Unit,
+     onCreateAccount: () -> Unit,
+-    onGoogleSignIn: () -> Unit
++    onGoogleSignIn: () -> Unit,
++    /** Null hides "Continue with WhatsApp number" (release builds have no lessons server). */
++    onWhatsApp: (() -> Unit)? = null
+ ) {
+     var isCreatingAccount by remember { mutableStateOf(false) }
+     val screenWidth = LocalConfiguration.current.screenWidthDp
+@@ -332,6 +359,130 @@ fun EmailInputScreen(
+             Text(stringResource(R.string.sign_in_with_google))
+         }
+ 
++        if (onWhatsApp != null) {
++            Spacer(Modifier.height(12.dp))
++            OutlinedButton(
++                onClick = onWhatsApp,
++                modifier = Modifier
++                    .fillMaxWidth()
++                    .height(50.dp),
++                shape = RoundedCornerShape(12.dp)
++            ) {
++                Text("Continue with WhatsApp number")
++            }
++        }
++
++        Spacer(Modifier.weight(1f))
++    }
++}
++
++// ==================== WhatsApp number sign-in ====================
++
++/** Phone first, then the 6-digit code sent on WhatsApp. Same look as the email screen. */
++@Composable
++fun WhatsAppSignInScreen(
++    state: WhatsAppState,
++    onPhoneChange: (String) -> Unit,
++    onSendCode: () -> Unit,
++    onCodeChange: (String) -> Unit,
++    onVerify: () -> Unit,
++    onResend: () -> Unit,
++    onChangeNumber: () -> Unit,
++    onBack: () -> Unit
++) {
++    // Back from the code step returns to the number; from the number it returns to the other sign-in options.
++    androidx.activity.compose.BackHandler {
++        if (state.step == WhatsAppStep.CODE) onChangeNumber() else onBack()
++    }
++    val screenWidth = LocalConfiguration.current.screenWidthDp
++    val horizontalPadding = if (screenWidth < 360) 16.dp else 24.dp
++    val titleSize = if (screenWidth < 360) 20.sp else 24.sp
++
++    Column(
++        modifier = Modifier
++            .fillMaxSize()
++            .background(Color(0xFFF6F6F8))
++            .systemBarsPadding()
++            .verticalScroll(rememberScrollState())
++            .padding(horizontal = horizontalPadding, vertical = 16.dp),
++        horizontalAlignment = Alignment.CenterHorizontally,
++        verticalArrangement = Arrangement.Center
++    ) {
++        Spacer(Modifier.weight(1f))
++        Text("💬", fontSize = if (screenWidth < 360) 36.sp else 48.sp)
++        Spacer(Modifier.height(12.dp))
++        Text(
++            if (state.step == WhatsAppStep.PHONE) "Continue with WhatsApp" else "Enter your code",
++            fontSize = titleSize, fontWeight = FontWeight.Bold
++        )
++        Text(
++            if (state.step == WhatsAppStep.PHONE) "We'll send a 6-digit code to your WhatsApp."
++            else "We sent a 6-digit code on WhatsApp to ${state.phone}.",
++            fontSize = 14.sp, color = Color(0xFF6B7280), textAlign = TextAlign.Center
++        )
++        Spacer(Modifier.height(24.dp))
++
++        if (state.step == WhatsAppStep.PHONE) {
++            OutlinedTextField(
++                value = state.phoneInput,
++                onValueChange = onPhoneChange,
++                label = { Text("WhatsApp number") },
++                supportingText = { Text("Without a country code it's +91. For another country start with + and the code.") },
++                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
++                enabled = !state.busy,
++                modifier = Modifier.fillMaxWidth(),
++                shape = RoundedCornerShape(12.dp),
++                singleLine = true
++            )
++        } else {
++            OutlinedTextField(
++                value = state.code,
++                onValueChange = onCodeChange,
++                label = { Text("6-digit code") },
++                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
++                enabled = !state.busy && !state.signedIn,
++                modifier = Modifier.fillMaxWidth(),
++                shape = RoundedCornerShape(12.dp),
++                singleLine = true
++            )
++        }
++
++        state.error?.let {
++            Text(it, color = Color.Red, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
++        }
++
++        Spacer(Modifier.height(16.dp))
++
++        Button(
++            onClick = if (state.step == WhatsAppStep.PHONE) onSendCode else onVerify,
++            enabled = if (state.step == WhatsAppStep.PHONE) !state.busy && state.phoneInput.isNotBlank() else state.canSubmitCode,
++            modifier = Modifier
++                .fillMaxWidth()
++                .height(50.dp),
++            shape = RoundedCornerShape(12.dp),
++            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB))
++        ) {
++            if (state.busy || state.signedIn) CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color.White)
++            else Text(if (state.step == WhatsAppStep.PHONE) "Send code" else "Verify")
++        }
++
++        if (state.step == WhatsAppStep.CODE) {
++            Spacer(Modifier.height(8.dp))
++            TextButton(onClick = onResend, enabled = state.canResend) {
++                Text(
++                    if (state.resendIn > 0) "Resend code in ${state.resendIn}s" else "Resend code",
++                    color = if (state.canResend) Color(0xFF2563EB) else Color(0xFF9CA3AF)
++                )
++            }
++            TextButton(onClick = onChangeNumber, enabled = !state.busy) {
++                Text("Use a different number", color = Color(0xFF2563EB))
++            }
++        } else {
++            Spacer(Modifier.height(8.dp))
++            TextButton(onClick = onBack, enabled = !state.busy) {
++                Text("Other sign-in options", color = Color(0xFF2563EB))
++            }
++        }
+         Spacer(Modifier.weight(1f))
+     }
+ }
+diff --git a/app/src/main/java/org/ekatra/alfred/viewmodel/ProfileViewModel.kt b/app/src/main/java/org/ekatra/alfred/viewmodel/ProfileViewModel.kt
+index 7c35054..5620df5 100644
+--- a/app/src/main/java/org/ekatra/alfred/viewmodel/ProfileViewModel.kt
++++ b/app/src/main/java/org/ekatra/alfred/viewmodel/ProfileViewModel.kt
+@@ -20,6 +20,10 @@ import org.ekatra.alfred.data.ConsentManager
+ import org.ekatra.alfred.data.local.UserProfileDao
+ import org.ekatra.alfred.data.local.EkatraDatabase
+ import org.ekatra.alfred.data.model.UserProfile
++import org.ekatra.alfred.lessons.FirebaseSession
++import org.ekatra.alfred.lessons.LearnerSessionHooks
++import org.ekatra.alfred.lessons.PhoneAuthApi
++import org.ekatra.alfred.lessons.WhatsAppSignIn
+ import java.util.concurrent.TimeUnit
+ import javax.inject.Inject
+ 
+@@ -44,7 +48,9 @@ data class ProfileUiState(
+     val preferredLanguage: String = "en",
+     val isLoading: Boolean = false,
+     val error: String? = null,
+-    val userProfile: UserProfile? = null
++    val userProfile: UserProfile? = null,
++    /** The "Continue with WhatsApp number" screens are showing instead of the email / Google ones. */
++    val showWhatsApp: Boolean = false
+ )
+ 
+ @HiltViewModel
+@@ -54,7 +60,10 @@ class ProfileViewModel @Inject constructor(
+     private val userProfileDao: UserProfileDao,
+     private val database: EkatraDatabase,
+     private val analyticsHelper: AnalyticsHelper,
+-    private val consentManager: ConsentManager
++    private val consentManager: ConsentManager,
++    phoneAuthApi: PhoneAuthApi,
++    firebaseSession: FirebaseSession,
++    private val lessonsSession: LearnerSessionHooks
+ ) : ViewModel() {
+ 
+     companion object {
+@@ -69,6 +78,25 @@ class ProfileViewModel @Inject constructor(
+ 
+     private var authChecked = false
+ 
++    /** Sign in with a one-time code sent on WhatsApp; ends in a Firebase sign-in like Google or email. */
++    val whatsApp = WhatsAppSignIn(phoneAuthApi, firebaseSession, viewModelScope) { onWhatsAppSignedIn() }
++
++    fun openWhatsApp() {
++        whatsApp.reset()
++        _uiState.update { it.copy(showWhatsApp = true, error = null) }
++    }
++
++    fun closeWhatsApp() {
++        whatsApp.reset()
++        _uiState.update { it.copy(showWhatsApp = false) }
++    }
++
++    private suspend fun onWhatsAppSignedIn() {
++        val user = firebaseAuth.currentUser
++        _uiState.update { it.copy(showWhatsApp = false) }
++        if (user != null) continueAfterAuth(user)
++    }
++
+     /**
+      * Resumes a signed-in session. The login flow calls this; edit mode (Settings > Profile)
+      * does not, because there AUTHENTICATED means "saved, go back" and the screen would close.
+@@ -323,6 +351,8 @@ class ProfileViewModel @Inject constructor(
+     }
+ 
+     private suspend fun continueAfterAuth(user: com.google.firebase.auth.FirebaseUser) {
++        // Trade this Firebase user for a lessons token in the background (needs the network; skipped offline).
++        viewModelScope.launch { lessonsSession.afterSignIn() }
+         // Check if profile exists
+         val existingProfile = userProfileDao.getProfile(user.uid)
+         if (existingProfile != null) {
+@@ -462,6 +492,8 @@ class ProfileViewModel @Inject constructor(
+     fun signOut() {
+         viewModelScope.launch {
+             firebaseAuth.signOut()
++            lessonsSession.afterSignOut()
++            whatsApp.reset()
+             val uid = _uiState.value.userProfile?.uid
+             if (uid != null) userProfileDao.deleteProfile(uid)
+             _uiState.update { ProfileUiState() }
+diff --git a/app/src/main/java/org/ekatra/alfred/viewmodel/SettingsViewModel.kt b/app/src/main/java/org/ekatra/alfred/viewmodel/SettingsViewModel.kt
+index b5c9b97..6677bb5 100644
+--- a/app/src/main/java/org/ekatra/alfred/viewmodel/SettingsViewModel.kt
++++ b/app/src/main/java/org/ekatra/alfred/viewmodel/SettingsViewModel.kt
+@@ -15,6 +15,7 @@ import org.ekatra.alfred.data.local.UserProfileDao
+ import org.ekatra.alfred.data.model.UserProfile
+ import org.ekatra.alfred.data.repository.ChatRepository
+ import org.ekatra.alfred.data.sync.SyncManager
++import org.ekatra.alfred.lessons.LearnerSessionHooks
+ import java.io.ByteArrayOutputStream
+ import java.util.zip.ZipEntry
+ import java.util.zip.ZipOutputStream
+@@ -35,7 +36,8 @@ class SettingsViewModel @Inject constructor(
+     private val firebaseAuth: FirebaseAuth,
+     private val userProfileDao: UserProfileDao,
+     private val chatRepository: ChatRepository,
+-    private val syncManager: SyncManager
++    private val syncManager: SyncManager,
++    private val lessonsSession: LearnerSessionHooks
+ ) : ViewModel() {
+ 
+     private val _uiState = MutableStateFlow(SettingsUiState())
+@@ -68,6 +70,8 @@ class SettingsViewModel @Inject constructor(
+         viewModelScope.launch {
+             val uid = firebaseAuth.currentUser?.uid
+             firebaseAuth.signOut()
++            // Signing out also drops the lessons token and this learner's lessons from the phone.
++            lessonsSession.afterSignOut()
+             if (uid != null) userProfileDao.deleteProfile(uid)
+             _uiState.update { it.copy(userProfile = null) }
+         }
+diff --git a/app/src/test/java/org/ekatra/alfred/viewmodel/SettingsViewModelTest.kt b/app/src/test/java/org/ekatra/alfred/viewmodel/SettingsViewModelTest.kt
+index 9d1246c..3dd7d00 100644
+--- a/app/src/test/java/org/ekatra/alfred/viewmodel/SettingsViewModelTest.kt
++++ b/app/src/test/java/org/ekatra/alfred/viewmodel/SettingsViewModelTest.kt
+@@ -24,6 +24,7 @@ class SettingsViewModelTest {
+     private lateinit var auth: FirebaseAuth
+     private lateinit var profileDao: UserProfileDao
+     private lateinit var chatRepository: ChatRepository
++    private lateinit var lessonsSession: org.ekatra.alfred.lessons.LearnerSessionHooks
+     private lateinit var syncManager: SyncManager
+     private lateinit var viewModel: SettingsViewModel
+ 
+@@ -35,6 +36,7 @@ class SettingsViewModelTest {
+         profileDao = mockk(relaxed = true)
+         chatRepository = mockk(relaxed = true)
+         syncManager = mockk(relaxed = true)
++        lessonsSession = mockk(relaxed = true)
+ 
+         every { syncManager.pendingSyncCount } returns flowOf(3)
+     }
+@@ -60,7 +62,7 @@ class SettingsViewModelTest {
+         every { auth.currentUser } returns user
+         coEvery { profileDao.getProfile("test-uid") } returns profile
+ 
+-        viewModel = SettingsViewModel(auth, profileDao, chatRepository, syncManager)
++        viewModel = SettingsViewModel(auth, profileDao, chatRepository, syncManager, lessonsSession)
+         advanceUntilIdle()
+ 
+         val state = viewModel.uiState.value
+@@ -76,7 +78,7 @@ class SettingsViewModelTest {
+         every { auth.currentUser } returns user
+         coEvery { profileDao.getProfile("sign-out-uid") } returns null
+ 
+-        viewModel = SettingsViewModel(auth, profileDao, chatRepository, syncManager)
++        viewModel = SettingsViewModel(auth, profileDao, chatRepository, syncManager, lessonsSession)
+         advanceUntilIdle()
+ 
+         viewModel.signOut()
+@@ -86,13 +88,27 @@ class SettingsViewModelTest {
+         coVerify { profileDao.deleteProfile("sign-out-uid") }
+     }
+ 
++    @Test
++    fun `signOut also clears the lessons token and the local lesson data`() = runTest {
++        val user = mockk<FirebaseUser> { every { uid } returns "u" }
++        every { auth.currentUser } returns user
++        coEvery { profileDao.getProfile("u") } returns null
++        viewModel = SettingsViewModel(auth, profileDao, chatRepository, syncManager, lessonsSession)
++        advanceUntilIdle()
++
++        viewModel.signOut()
++        advanceUntilIdle()
++
++        coVerify(exactly = 1) { lessonsSession.afterSignOut() }
++    }
++
+     @Test
+     fun `exportData returns JSON`() = runTest {
+         every { auth.currentUser } returns null
+         coEvery { profileDao.getProfile(any()) } returns null
+         coEvery { chatRepository.exportAllAsJson() } returns """{"sessions":[]}"""
+ 
+-        viewModel = SettingsViewModel(auth, profileDao, chatRepository, syncManager)
++        viewModel = SettingsViewModel(auth, profileDao, chatRepository, syncManager, lessonsSession)
+         advanceUntilIdle()
+ 
+         var result: ByteArray? = null
+@@ -107,7 +123,7 @@ class SettingsViewModelTest {
+         every { auth.currentUser } returns null
+         coEvery { profileDao.getProfile(any()) } returns null
+ 
+-        viewModel = SettingsViewModel(auth, profileDao, chatRepository, syncManager)
++        viewModel = SettingsViewModel(auth, profileDao, chatRepository, syncManager, lessonsSession)
+         advanceUntilIdle()
+ 
+         assertEquals(3, viewModel.uiState.value.pendingSyncCount)

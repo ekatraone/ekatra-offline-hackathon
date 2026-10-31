@@ -66,7 +66,8 @@ data class MeLearner(
     val id: String? = null,
     val name: String? = null,
     val phone: String? = null,
-    val language: String? = null
+    val language: String? = null,
+    val email: String? = null
 )
 
 data class MeCourse(

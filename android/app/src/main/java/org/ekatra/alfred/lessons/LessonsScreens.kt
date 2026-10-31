@@ -32,7 +32,7 @@ private val Green = Color(0xFF16A34A)
 private val Red = Color(0xFFDC2626)
 
 @Composable
-fun LessonsApp(onExit: () -> Unit, vm: LessonsViewModel = hiltViewModel()) {
+fun LessonsApp(onExit: () -> Unit, onSignIn: () -> Unit, vm: LessonsViewModel = hiltViewModel()) {
     val ui by vm.uiState.collectAsState()
     BackHandler { if (!vm.back()) onExit() }
 
@@ -40,7 +40,7 @@ fun LessonsApp(onExit: () -> Unit, vm: LessonsViewModel = hiltViewModel()) {
         LessonsTopBar(ui, onBack = { if (!vm.back()) onExit() })
         Box(Modifier.weight(1f)) {
             when (val screen = ui.screen) {
-                is LessonsScreen.Home -> HomeScreen(ui, vm)
+                is LessonsScreen.Home -> HomeScreen(ui, vm, onSignIn)
                 is LessonsScreen.Lesson -> {
                     val lesson = vm.findLesson(screen.courseId, screen.lessonId)
                     if (lesson == null) HomeFallback(vm) else when (screen.stage) {
@@ -103,6 +103,33 @@ private fun SyncChip(ui: LessonsUiState, onDark: Boolean = false) {
     )
 }
 
+// ---------------- no token yet ----------------
+
+@Composable
+private fun SignInCard(ui: LessonsUiState, vm: LessonsViewModel, onSignIn: () -> Unit) {
+    Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            when (ui.signIn) {
+                LessonsSignIn.NEEDS_SIGN_IN -> {
+                    Text("Sign in to get lessons", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Text("Lessons are made for you and kept with your account, so your progress follows you.", fontSize = 14.sp, color = Color(0xFF475569))
+                    Button(onClick = onSignIn) { Text("Sign in") }
+                }
+                LessonsSignIn.GETTING_READY -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Text("Getting your lessons ready…", fontSize = 14.sp)
+                }
+                LessonsSignIn.FAILED -> {
+                    Text(ui.signInMessage ?: LessonsViewModel.SETUP_FAILED_MESSAGE, fontSize = 14.sp, color = Red, fontWeight = FontWeight.SemiBold)
+                    Button(onClick = vm::retrySignIn) { Text("Try again") }
+                }
+                LessonsSignIn.UNAVAILABLE -> Text("Lessons aren't set up on this build.", color = Red, fontSize = 14.sp)
+                LessonsSignIn.READY -> Unit
+            }
+        }
+    }
+}
+
 // ---------------- home ----------------
 
 internal data class PendingMessage(val text: String, val showProgress: Boolean)
@@ -122,38 +149,39 @@ internal fun pendingRequestMessage(ui: LessonsUiState): PendingMessage? = when {
 internal fun failedRequestText(f: FailedLessonRequest) = "Couldn't create lesson: ${f.reason}"
 
 @Composable
-private fun HomeScreen(ui: LessonsUiState, vm: LessonsViewModel) {
+private fun HomeScreen(ui: LessonsUiState, vm: LessonsViewModel, onSignIn: () -> Unit) {
     var topic by remember { mutableStateOf("") }
     LazyColumn(
         Modifier.fillMaxSize().navigationBarsPadding(),
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        item {
-            Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Ask for a lesson", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                    OutlinedTextField(
-                        value = topic, onValueChange = { topic = it }, singleLine = true,
-                        enabled = ui.configured && !ui.requesting,
-                        label = { Text("Topic, e.g. fractions") }, modifier = Modifier.fillMaxWidth()
-                    )
-                    // While a request is in flight the card below shows the progress; this button just waits.
-                    Button(
-                        onClick = { if (vm.askForLesson(topic)) topic = "" },
-                        enabled = ui.configured && topic.isNotBlank() && !ui.requesting
-                    ) { Text(if (ui.requesting) "Creating…" else if (ui.online) "Create lesson" else "Queue lesson") }
-                    if (!ui.configured) {
-                        Text("Lessons aren't set up on this build.", color = Red, fontSize = 13.sp)
-                    }
-                    ui.notice?.let {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(it, Modifier.weight(1f), fontSize = 13.sp, color = if (it.startsWith("Couldn't")) Red else Color(0xFF334155))
-                            TextButton(onClick = vm::dismissNotice) { Text("OK") }
+        if (ui.signIn == LessonsSignIn.READY) {
+            item {
+                Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Ask for a lesson", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        OutlinedTextField(
+                            value = topic, onValueChange = { topic = it }, singleLine = true,
+                            enabled = ui.configured && !ui.requesting,
+                            label = { Text("Topic, e.g. fractions") }, modifier = Modifier.fillMaxWidth()
+                        )
+                        // While a request is in flight the card below shows the progress; this button just waits.
+                        Button(
+                            onClick = { if (vm.askForLesson(topic)) topic = "" },
+                            enabled = ui.configured && topic.isNotBlank() && !ui.requesting
+                        ) { Text(if (ui.requesting) "Creating…" else if (ui.online) "Create lesson" else "Queue lesson") }
+                        ui.notice?.let {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(it, Modifier.weight(1f), fontSize = 13.sp, color = if (it.startsWith("Couldn't")) Red else Color(0xFF334155))
+                                TextButton(onClick = vm::dismissNotice) { Text("OK") }
+                            }
                         }
                     }
                 }
             }
+        } else {
+            item { SignInCard(ui, vm, onSignIn) }
         }
         items(ui.failedRequests, key = { "failed-" + it.clientRequestId }) { f ->
             Card(colors = CardDefaults.cardColors(containerColor = Color(0xFFFEE2E2))) {
@@ -180,7 +208,7 @@ private fun HomeScreen(ui: LessonsUiState, vm: LessonsViewModel) {
                 }
             }
         }
-        if (ui.bundles.isEmpty() && ui.configured && ui.pendingTopics.isEmpty() && ui.failedRequests.isEmpty()) {
+        if (ui.bundles.isEmpty() && ui.signIn == LessonsSignIn.READY && ui.pendingTopics.isEmpty() && ui.failedRequests.isEmpty()) {
             item { Text("No lessons yet. Ask for one above.", color = Color(0xFF64748B), modifier = Modifier.padding(8.dp)) }
         }
         items(ui.bundles, key = { it.course.id }) { bundle -> CourseCard(bundle, ui, vm) }
