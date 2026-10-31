@@ -56,6 +56,7 @@ export interface BundleLesson {
   content: string;
   day: number;
   order: number;
+  imageUrl: string | null;
   questions: BundleQuestion[];
 }
 
@@ -67,6 +68,7 @@ export interface Bundle {
     description: string;
     language: string;
     generator: { provider: string; model: string } | null;
+    coverImageUrl: string | null;
   };
   lessons: BundleLesson[];
 }
@@ -265,7 +267,7 @@ export async function buildBundle(db: SyncDb, learner: SyncLearner, courseId: st
 
   const lessonRows = (
     await db.raw(
-      `SELECT id, title, content, content_type, sequence_order, day_number
+      `SELECT id, title, content, content_type, sequence_order, day_number, media_url
        FROM lessons WHERE course_id = $1 ORDER BY sequence_order ASC`,
       [courseId],
     )
@@ -302,6 +304,8 @@ export async function buildBundle(db: SyncDb, learner: SyncLearner, courseId: st
     content: l.content ?? '',
     day: l.day_number ?? 1,
     order: l.sequence_order,
+    // Review lessons never carry an image; media_url is only ever set on modules we generated.
+    imageUrl: l.content_type === 'review' ? null : l.media_url ?? null,
     questions: byLesson.get(l.id) ?? [],
   }));
 
@@ -314,6 +318,7 @@ export async function buildBundle(db: SyncDb, learner: SyncLearner, courseId: st
       description: course.description ?? '',
       language: settings.language ?? 'en',
       generator: settings.generator ?? null,
+      coverImageUrl: settings.coverImageUrl ?? null,
     },
     lessons,
   };

@@ -108,6 +108,32 @@ function fail(res: Response, err: unknown, what: string): void {
 
 export function createSyncRouter({ db, generator }: SyncRouterDeps): Router {
   const router = Router();
+
+  // Public, registered before the auth middleware: Twilio/WhatsApp fetch these by URL. The
+  // unguessable UUID is the capability; anything that isn't a UUID is a plain 404.
+  router.get('/media/:id', async (req: Request, res: Response) => {
+    try {
+      if (!isUuid(req.params.id)) {
+        res.status(404).json({ success: false, error: 'Not found' });
+        return;
+      }
+      const found = await db.raw(`SELECT mime, bytes FROM lesson_media WHERE id = $1`, [req.params.id]);
+      const row = found.rows[0];
+      if (!row) {
+        res.status(404).json({ success: false, error: 'Not found' });
+        return;
+      }
+      res.set({
+        'Content-Type': row.mime || 'image/jpeg',
+        'Cache-Control': 'public, max-age=31536000, immutable',
+        'Content-Length': String(row.bytes.length),
+      });
+      res.send(row.bytes);
+    } catch (err) {
+      fail(res, err, 'media');
+    }
+  });
+
   router.use(learnerAuth(db));
 
   router.get('/me', perLearner(60, 60_000), async (req: SyncRequest, res: Response) => {

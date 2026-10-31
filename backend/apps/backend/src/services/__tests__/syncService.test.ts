@@ -40,14 +40,14 @@ function makeDb(opts: { authored?: boolean; enrolled?: boolean; otherOrg?: boole
     id: COURSE,
     title: 'Compound interest',
     description: 'd',
-    settings: { language: 'en', generator: { provider: 'meta', model: 'muse-spark-1.3' } },
+    settings: { language: 'en', coverImageUrl: 'https://demo.example/api/sync/media/cover1', generator: { provider: 'meta', model: 'muse-wonder-1.0' } },
     source: opts.authored ? 'authored' : 'ai_generated',
     fsm_definition_id: null,
     organization_id: opts.otherOrg ? 'other-org' : ORG,
   };
   const lessons = [
-    { id: LESSON1, title: 'One', content: 'a', content_type: 'text', sequence_order: 1, day_number: 1, course_id: COURSE },
-    { id: LESSON2, title: 'Day 1 Review', content: '', content_type: 'review', sequence_order: 2, day_number: null, course_id: COURSE },
+    { id: LESSON1, title: 'One', content: 'a', content_type: 'text', sequence_order: 1, day_number: 1, course_id: COURSE, media_url: 'https://demo.example/api/sync/media/m1' },
+    { id: LESSON2, title: 'Day 1 Review', content: '', content_type: 'review', sequence_order: 2, day_number: null, course_id: COURSE, media_url: 'https://demo.example/api/sync/media/should-not-appear' },
   ];
   const questions = [
     // options stored as a JSON string on purpose: JSONB can come back stringified
@@ -326,7 +326,10 @@ test('bundle: parses stringified options, uppercases the key, sorts and labels r
   assert.equal(b.lessons[1].day, 1); // NULL day_number → 1
   assert.deepEqual(b.lessons[0].questions[0].options, ['a', 'b', 'c', 'd']);
   assert.equal(b.lessons[0].questions[0].correctAnswer, 'B');
-  assert.deepEqual(b.course.generator, { provider: 'meta', model: 'muse-spark-1.3' });
+  assert.deepEqual(b.course.generator, { provider: 'meta', model: 'muse-wonder-1.0' });
+  assert.equal(b.course.coverImageUrl, 'https://demo.example/api/sync/media/cover1');
+  assert.equal(b.lessons[0].imageUrl, 'https://demo.example/api/sync/media/m1');
+  assert.equal(b.lessons[1].imageUrl, null); // review lessons never carry an image
   assert.match(b.version, /^[0-9a-f]{40}$/);
 });
 
@@ -416,4 +419,19 @@ test('events: the profile is recomputed and stored once per batch', async () => 
   const db = makeDb();
   await applyEvents(db, LEARNER, [ev(1), ev(2), ev(3, { answer: 'A' })]);
   assert.equal(db.calls.profileWrites, 1);
+});
+
+test('bundle: image URLs are null when a course has no images', async () => {
+  // A db whose course/lessons have no media
+  const db: any = makeDb();
+  const raw = db.raw.bind(db);
+  db.raw = async (sql: string, p: any[]) => {
+    const r = await raw(sql, p);
+    if (sql.includes('FROM enrollments e JOIN courses c')) return { rows: r.rows.map((c: any) => ({ ...c, settings: { language: 'en' } })) };
+    if (sql.includes('FROM lessons WHERE course_id')) return { rows: r.rows.map((l: any) => ({ ...l, media_url: null })) };
+    return r;
+  };
+  const b = await buildBundle(db, LEARNER, COURSE);
+  assert.equal(b.course.coverImageUrl, null);
+  assert.deepEqual(b.lessons.map((l) => l.imageUrl), [null, null]);
 });
