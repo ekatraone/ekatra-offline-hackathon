@@ -10,6 +10,9 @@ import { createSyncRouter } from '../sync.js';
 import { ORG, makeAuthDb, makeFirebase } from './fakeAuthDb.js';
 
 const SECRET = 'secret-for-exchange-tests';
+const custom = { firebase: { sign_in_provider: 'custom' } };
+const viaPhone = { firebase: { sign_in_provider: 'phone' } };
+const google = { firebase: { sign_in_provider: 'google.com' } };
 let servers: Server[] = [];
 const savedEnv = { ...process.env };
 beforeEach(() => { process.env.JWT_SECRET = SECRET; });
@@ -52,7 +55,7 @@ test('exchange: a missing idToken is a 400, and no Firebase configuration is a 5
 
 test('exchange: a phone token maps onto the row the WhatsApp flow created (bare-digit phone)', async () => {
   const { exchange, db } = await startApp([{ phone: '919876543210', whatsapp_id: '919876543210', name: 'Friend' }]);
-  const body: any = await (await exchange({ uid: 'wa:919876543210', phone: '+919876543210' })).json();
+  const body: any = await (await exchange({ uid: 'wa:919876543210', phone: '+919876543210', ...custom })).json();
   assert.equal(body.data.learner.id, db.learners[0].id);
   assert.equal(body.data.learner.phone, '+919876543210');
   assert.equal(db.learners.length, 1);
@@ -60,8 +63,8 @@ test('exchange: a phone token maps onto the row the WhatsApp flow created (bare-
 
 test('exchange: Firebase phone_number and the wa: uid alone both resolve to the same phone learner', async () => {
   const { exchange, db } = await startApp();
-  const viaUid: any = await (await exchange({ uid: 'wa:919876543210' })).json();
-  const viaClaim: any = await (await exchange({ uid: 'someFirebaseUid', phone_number: '+919876543210' })).json();
+  const viaUid: any = await (await exchange({ uid: 'wa:919876543210', ...custom })).json();
+  const viaClaim: any = await (await exchange({ uid: 'someFirebaseUid', phone_number: '+919876543210', ...viaPhone })).json();
   assert.equal(viaUid.data.learner.id, viaClaim.data.learner.id);
   assert.equal(db.learners.length, 1);
   assert.equal(db.learners[0].phone, '919876543210'); // written the way WhatsApp writes it
@@ -69,16 +72,16 @@ test('exchange: Firebase phone_number and the wa: uid alone both resolve to the 
 
 test('exchange: for wa: users the uid wins over a mismatching phone claim', async () => {
   const { exchange, db } = await startApp();
-  const body: any = await (await exchange({ uid: 'wa:919876543210', phone: '+911111111111' })).json();
+  const body: any = await (await exchange({ uid: 'wa:919876543210', phone: '+911111111111', ...custom })).json();
   assert.equal(body.data.learner.phone, '+919876543210');
   assert.equal(db.learners.length, 1);
 });
 
 test('exchange: a malformed wa: uid or phone claim is a 401', async () => {
   const { exchange } = await startApp();
-  assert.equal((await exchange({ uid: 'wa:12' })).status, 401);
-  assert.equal((await exchange({ uid: 'wa:abc' })).status, 401);
-  assert.equal((await exchange({ uid: 'g1', phone_number: 'not-a-phone' })).status, 401);
+  assert.equal((await exchange({ uid: 'wa:12', ...custom })).status, 401);
+  assert.equal((await exchange({ uid: 'wa:abc', ...custom })).status, 401);
+  assert.equal((await exchange({ uid: 'g1', phone_number: 'not-a-phone', ...viaPhone })).status, 401);
 });
 
 test('exchange: a Google/email user maps to a "fb:<uid>" learner with name and email', async () => {
@@ -142,7 +145,10 @@ test('messaging: nothing is ever sent to an "fb:" learner, whatever the provider
         await messaging.sendTemplate(to, 'HXabc', { '1': 'x' }),
         await messaging.sendDocument(to, { documentUrl: 'https://x.test/a.pdf' }),
       ];
-      for (const r of results) assert.equal(r.success, false);
+      for (const r of results) {
+        assert.equal(r.success, false);
+        assert.equal(r.permanent, true, 'a no-channel result is a permanent skip, never retried or queued');
+      }
     }
     assert.equal(fetches, 0, 'no network call may be made for an fb: recipient');
     assert.equal(isAppOnlyRecipient('fb:abc'), true);
@@ -156,4 +162,36 @@ test('messaging: nothing is ever sent to an "fb:" learner, whatever the provider
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+// ── a phone identity is trusted only from the provider that can vouch for it ──
+
+test('exchange: a wa: uid or phone claim from Google/email/anonymous is NOT a phone identity', async () => {
+  for (const firebase of [google.firebase, { sign_in_provider: 'password' }, { sign_in_provider: 'anonymous' }, undefined]) {
+    const { exchange, db } = await startApp([{ phone: '919876543210', whatsapp_id: '919876543210', name: 'Victim' }]);
+    const spoofedUid: any = await (await exchange({ uid: 'wa:919876543210', phone: '+919876543210', phone_number: '+919876543210', firebase })).json();
+    assert.equal(spoofedUid.data.learner.phone, null, `provider ${firebase?.sign_in_provider}`);
+    assert.notEqual(spoofedUid.data.learner.id, db.learners[0].id, 'must not land on the victim\'s row');
+    assert.equal(db.learners[1].phone, 'fb:wa:919876543210');
+  }
+});
+
+test('exchange: phone_number is trusted only for sign_in_provider "phone"; the custom `phone` claim only for "custom"', async () => {
+  const { exchange, db } = await startApp();
+  const a: any = await (await exchange({ uid: 'u1', phone_number: '+919876543210', ...google })).json();
+  assert.equal(a.data.learner.phone, null); // Google user carrying a phone_number: plain fb: user
+  const b: any = await (await exchange({ uid: 'u2', phone: '+919876543210', ...viaPhone })).json();
+  assert.equal(b.data.learner.phone, null); // `phone` claim from phone auth is not trusted
+  const c: any = await (await exchange({ uid: 'u3', phone_number: '+919876543210', ...viaPhone })).json();
+  assert.equal(c.data.learner.phone, '+919876543210');
+  const d: any = await (await exchange({ uid: 'cust', phone: '+919876543210', ...custom })).json();
+  assert.equal(d.data.learner.id, c.data.learner.id); // both trusted paths reach the same phone row
+  assert.equal(db.learners.filter((l) => l.phone === '919876543210').length, 1);
+});
+
+test('exchange: a custom token with no valid wa: uid or phone claim is a plain fb: user, but a malformed one is a 401', async () => {
+  const { exchange } = await startApp();
+  const plain: any = await (await exchange({ uid: 'someone', ...custom })).json();
+  assert.equal(plain.data.learner.phone, null);
+  assert.equal((await exchange({ uid: 'x', phone: 'garbage', ...custom })).status, 401);
 });

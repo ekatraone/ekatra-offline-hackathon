@@ -8,10 +8,10 @@ import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import express from 'express';
 import jwt from 'jsonwebtoken';
-import { createSyncRouter } from '../sync.js';
+import { createSyncRouter, testerJoinEnabled } from '../sync.js';
 
 const SECRET = 'test-secret-for-join';
-const CODE = 'tester-code-123';
+const CODE = 'tester-code-1234567'; // 19 characters (the minimum is 16)
 const ORG = '00000000-0000-4000-8000-0000000000aa';
 
 interface Learner { id: string; organization_id: string; phone: string; whatsapp_id: string | null; name: string | null; created_at: number }
@@ -181,4 +181,51 @@ test('join: the returned token has the learner format and passes /me', async () 
   const me = await fetch(`${base}/api/sync/me`, { headers: { Authorization: `Bearer ${data.token}` } });
   assert.equal(me.status, 200);
   assert.equal(((await me.json()) as any).data.learner.id, data.learner.id);
+});
+
+// ── hardening ──────────────────────────────────────────────────────────────
+
+test('join: a DEMO_INVITE_CODE shorter than 16 characters is treated as disabled', async () => {
+  process.env.DEMO_INVITE_CODE = 'short-code-15chr'.slice(0, 15);
+  const { join } = await startApp();
+  assert.equal((await join({ inviteCode: process.env.DEMO_INVITE_CODE, phone: '+919876543210' })).status, 404);
+  process.env.DEMO_INVITE_CODE = 'exactly-16-chars';
+  assert.equal(process.env.DEMO_INVITE_CODE.length, 16);
+  assert.equal((await join({ inviteCode: process.env.DEMO_INVITE_CODE, phone: '+919876543210' })).status, 200);
+});
+
+test('join: in production it is 404 unless ALLOW_TESTER_JOIN=1 is also set', async () => {
+  process.env.NODE_ENV = 'production';
+  const { join } = await startApp();
+  assert.equal((await join({ inviteCode: CODE, phone: '+919876543210' })).status, 404);
+  process.env.ALLOW_TESTER_JOIN = 'true'; // only the exact value 1 counts
+  assert.equal((await join({ inviteCode: CODE, phone: '+919876543210' })).status, 404);
+  process.env.ALLOW_TESTER_JOIN = '1';
+  assert.equal((await join({ inviteCode: CODE, phone: '+919876543210' })).status, 200);
+});
+
+test('join: testerJoinEnabled covers every combination', () => {
+  const code = 'a-long-enough-invite';
+  assert.equal(testerJoinEnabled({}), false);
+  assert.equal(testerJoinEnabled({ DEMO_INVITE_CODE: code }), true);
+  assert.equal(testerJoinEnabled({ DEMO_INVITE_CODE: code, NODE_ENV: 'production' }), false);
+  assert.equal(testerJoinEnabled({ DEMO_INVITE_CODE: code, NODE_ENV: 'production', ALLOW_TESTER_JOIN: '1' }), true);
+  assert.equal(testerJoinEnabled({ NODE_ENV: 'production', ALLOW_TESTER_JOIN: '1' }), false);
+});
+
+test('join: a boot warning is logged when production has both ALLOW_TESTER_JOIN and a code', async () => {
+  const { logger } = await import('../../lib/logger.js');
+  const warnings: string[] = [];
+  const orig = (logger as any).warn;
+  (logger as any).warn = (...a: any[]) => { warnings.push(a.join(' ')); };
+  try {
+    process.env.NODE_ENV = 'production';
+    await startApp();
+    assert.equal(warnings.some((w) => /Tester sign-in/.test(w)), false);
+    process.env.ALLOW_TESTER_JOIN = '1';
+    await startApp();
+    assert.equal(warnings.filter((w) => /Tester sign-in .* ENABLED in production/.test(w)).length, 1);
+  } finally {
+    (logger as any).warn = orig;
+  }
 });

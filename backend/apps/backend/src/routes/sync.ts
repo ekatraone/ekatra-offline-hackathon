@@ -117,8 +117,25 @@ function fail(res: Response, err: unknown, what: string): void {
   res.status(500).json({ success: false, error: 'Internal error' });
 }
 
+export const MIN_INVITE_CODE_LENGTH = 16;
+
+/**
+ * Tester sign-in is a testing fallback. It is on only when DEMO_INVITE_CODE is set AND is at least
+ * 16 characters; and in production only when ALLOW_TESTER_JOIN=1 is also set.
+ */
+export function testerJoinEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  const code = env.DEMO_INVITE_CODE;
+  if (!code || code.length < MIN_INVITE_CODE_LENGTH) return false;
+  if (env.NODE_ENV === 'production' && env.ALLOW_TESTER_JOIN !== '1') return false;
+  return true;
+}
+
 export function createSyncRouter({ db, generator, firebase = getFirebaseAuth }: SyncRouterDeps): Router {
   const router = Router();
+
+  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_TESTER_JOIN === '1' && process.env.DEMO_INVITE_CODE) {
+    logger.warn('Tester sign-in (/api/sync/join) is ENABLED in production: ALLOW_TESTER_JOIN=1 and DEMO_INVITE_CODE are both set');
+  }
 
   // Public, registered before the auth middleware: Twilio/WhatsApp fetch these by URL. The
   // unguessable UUID is the capability; anything that isn't a UUID is a plain 404. It is exempt
@@ -182,7 +199,7 @@ export function createSyncRouter({ db, generator, firebase = getFirebaseAuth }: 
   router.post(
     '/join',
     (req: Request, res: Response, next: NextFunction) => {
-      if (!process.env.DEMO_INVITE_CODE) {
+      if (!testerJoinEnabled()) {
         res.status(404).json({ success: false, error: 'Not found' });
         return;
       }
@@ -273,15 +290,25 @@ export function createSyncRouter({ db, generator, firebase = getFirebaseAuth }: 
           return;
         }
 
-        // A phone identity is the same learner row WhatsApp chats use. For our own "wa:" users the
-        // uid is authoritative (only the server mints it); otherwise Firebase's phone_number
-        // claim or the custom `phone` claim is used.
-        const claimed = decoded.phone_number ?? decoded.phone;
-        const phone = uid.startsWith('wa:') ? `+${uid.slice(3)}` : typeof claimed === 'string' ? claimed : null;
-        if ((uid.startsWith('wa:') || phone) && !(phone && E164_RE.test(phone))) {
+        // A phone identity is the same learner row WhatsApp chats use, and is trusted only from the
+        // sign-in provider that can vouch for it: our own custom token (wa: uid or `phone` claim,
+        // minted only after a verified WhatsApp code) or Firebase phone auth (phone_number).
+        // Any other provider (Google, email, ...) is a plain app-only user, whatever claims it carries.
+        const signInProvider: unknown = decoded.firebase?.sign_in_provider;
+        let phone: string | null = null;
+        let phoneTrusted = false;
+        if (signInProvider === 'custom') {
+          if (uid.startsWith('wa:')) { phone = `+${uid.slice(3)}`; phoneTrusted = true; }
+          else if (typeof decoded.phone === 'string') { phone = decoded.phone; phoneTrusted = true; }
+        } else if (signInProvider === 'phone' && typeof decoded.phone_number === 'string') {
+          phone = decoded.phone_number;
+          phoneTrusted = true;
+        }
+        if (phoneTrusted && !(phone && E164_RE.test(phone))) {
           res.status(401).json({ success: false, error: 'Invalid token' });
           return;
         }
+        if (!phoneTrusted) phone = null;
 
         const name = typeof decoded.name === 'string' ? decoded.name : null;
         const email = typeof decoded.email === 'string' ? decoded.email : null;
@@ -307,6 +334,44 @@ export function createSyncRouter({ db, generator, firebase = getFirebaseAuth }: 
   );
 
   router.use(learnerAuth(db));
+
+  // Account deletion. One statement, so it is a single transaction: either everything below goes or
+  // nothing does. Enrollments, lesson_progress, learner_events, quiz_responses, flashcard_progress and
+  // sync_lesson_requests are removed by the learners foreign keys (ON DELETE CASCADE); message_log and
+  // failed_messages only SET NULL, so they are deleted explicitly, as are the sign-in codes and ledger
+  // rows for the number. Once the learners row is gone the JWT stops working (learnerAuth looks it up).
+  router.delete('/me', perLearner(5, 60 * 60_000), async (req: SyncRequest, res: Response) => {
+    try {
+      const learner = req.syncLearner!;
+      const result = await db.raw(
+        `WITH l AS (
+           SELECT id, phone FROM learners WHERE id = $1 AND organization_id = $2
+         ), numbers AS (
+           SELECT phone AS p FROM l
+           UNION SELECT '+' || regexp_replace(phone, '\\D', '', 'g') FROM l WHERE phone !~ '^fb:'
+         ), otp AS (
+           DELETE FROM otp_challenges WHERE phone IN (SELECT p FROM numbers) RETURNING 1
+         ), events AS (
+           DELETE FROM otp_events WHERE phone IN (SELECT p FROM numbers) RETURNING 1
+         ), msgs AS (
+           DELETE FROM message_log WHERE learner_id IN (SELECT id FROM l) RETURNING 1
+         ), failed AS (
+           DELETE FROM failed_messages WHERE learner_id IN (SELECT id FROM l) RETURNING 1
+         ), gone AS (
+           DELETE FROM learners WHERE id IN (SELECT id FROM l) RETURNING id
+         )
+         SELECT (SELECT COUNT(*) FROM gone)::int AS deleted`,
+        [learner.id, learner.organizationId],
+      );
+      if (!result.rows[0]?.deleted) {
+        res.status(404).json({ success: false, error: 'Account not found' });
+        return;
+      }
+      res.json({ success: true });
+    } catch (err) {
+      fail(res, err, 'delete me');
+    }
+  });
 
   router.get('/me', perLearner(60, 60_000), async (req: SyncRequest, res: Response) => {
     try {
