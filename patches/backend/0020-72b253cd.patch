@@ -1,0 +1,26 @@
+diff --git a/packages/messaging/src/index.ts b/packages/messaging/src/index.ts
+index c641faef..b43fe8a0 100644
+--- a/packages/messaging/src/index.ts
++++ b/packages/messaging/src/index.ts
+@@ -955,10 +955,17 @@ export function mediaIdFromPath(value: unknown): string | null {
+  * https origin; elsewhere an unset base falls back to localhost for local runs.
+  */
+ export function publicBaseUrl(env: Record<string, string | undefined> = process.env): string | null {
+-  const configured = (env.PUBLIC_BASE_URL || env.WEBHOOK_BASE_URL || '').trim().replace(/\/+$/, '');
+-  if (env.NODE_ENV === 'production') return /^https:\/\/[^/\s]+/i.test(configured) ? configured : null;
+-  if (configured) return configured;
+-  return `http://localhost:${env.PORT || 3001}`;
++  const configured = (env.PUBLIC_BASE_URL || env.WEBHOOK_BASE_URL || '').trim();
++  if (!configured) return env.NODE_ENV === 'production' ? null : `http://localhost:${env.PORT || 3001}`;
++  let url: URL;
++  try {
++    url = new URL(configured);
++  } catch {
++    return null; // not a URL (e.g. no scheme): better no links than wrong ones
++  }
++  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && env.NODE_ENV !== 'production')) return null;
++  // Origin only: a path, query or credentials on the configured value must never leak into media links.
++  return url.origin;
+ }
+ 
+ /** Absolute URL for a stored media path, or null when the value is junk or no base is configured. */

@@ -191,6 +191,18 @@ test('public base URL: PUBLIC_BASE_URL, then WEBHOOK_BASE_URL; production needs 
   assert.equal(publicBaseUrl({ PORT: '4000' }), 'http://localhost:4000');
 });
 
+test('public base URL is reduced to its origin, so a path, query or credentials cannot leak into links', () => {
+  assert.equal(publicBaseUrl({ PUBLIC_BASE_URL: 'https://demo.test/some/path?x=1#frag' }), 'https://demo.test');
+  assert.equal(publicBaseUrl({ WEBHOOK_BASE_URL: 'https://user:pw@demo.test:8443/api/webhooks/twilio' }), 'https://demo.test:8443');
+  assert.equal(absoluteMediaUrl('/api/sync/media/621c8ab0-aa14-4367-8b03-7b56caac9f33', { WEBHOOK_BASE_URL: 'https://demo.test/api/webhooks/twilio' }),
+    'https://demo.test/api/sync/media/621c8ab0-aa14-4367-8b03-7b56caac9f33');
+  assert.equal(publicBaseUrl({ PUBLIC_BASE_URL: 'demo.up.railway.app' }), null); // no scheme: not a URL
+  assert.equal(publicBaseUrl({ PUBLIC_BASE_URL: 'ftp://demo.test' }), null);
+  assert.equal(publicBaseUrl({ NODE_ENV: 'production', PUBLIC_BASE_URL: 'http://demo.test/x' }), null);
+  assert.equal(publicBaseUrl({ NODE_ENV: 'production', PUBLIC_BASE_URL: 'https://demo.test/x' }), 'https://demo.test');
+  assert.equal(publicBaseUrl({ PUBLIC_BASE_URL: 'http://192.168.1.5:3001/x' }), 'http://192.168.1.5:3001');
+});
+
 test('stored media values are relative; absolutized at use, and anything else is ignored', () => {
   const id = '621c8ab0-aa14-4367-8b03-7b56caac9f33';
   const env = { PUBLIC_BASE_URL: 'https://demo.test' };
