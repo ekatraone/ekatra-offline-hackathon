@@ -1,0 +1,13 @@
+diff --git a/apps/backend/src/index.ts b/apps/backend/src/index.ts
+index f367ba61..ea42bd47 100644
+--- a/apps/backend/src/index.ts
++++ b/apps/backend/src/index.ts
+@@ -92,7 +92,7 @@ app.use(express.urlencoded({ extended: false, limit: '10kb' }));
+ const apiLimiter = rateLimit({
+   windowMs: 15 * 60 * 1000,
+   max: 150,
+-  skip: (req) => req.path.includes('/webhooks'),
++  skip: (req) => req.path.includes('/webhooks') || req.path.startsWith('/sync/media/'),
+   standardHeaders: true,
+   legacyHeaders: false,
+   message: { success: false, error: 'Rate limit exceeded. Please try again later.' },
