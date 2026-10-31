@@ -48,12 +48,21 @@ test('the proxy line shows truncated addresses and only the number of X-Forwarde
   assert.match(describeProxyChain({ ip: '10.1.2.3', headers: {}, socket: {} } as any), /xff_hops=0/);
 });
 
-test('the proxy check logs exactly once, on the first request', () => {
+test('the proxy check logs exactly once, on the first request that carries X-Forwarded-For', () => {
   const lines: string[] = [];
   const mw = logProxyChainOnce((m) => lines.push(m));
   let nexts = 0;
-  const req: any = { ip: '203.0.113.77', headers: {}, socket: { remoteAddress: '203.0.113.1' } };
-  for (let i = 0; i < 3; i++) mw(req, {} as any, () => { nexts++; });
+  const next = () => { nexts++; };
+  const internal: any = { ip: '100.64.0.7', headers: {}, socket: { remoteAddress: '100.64.0.7' } }; // platform health check
+  const edge: any = { ip: '203.0.113.77', headers: { 'x-forwarded-for': '203.0.113.77' }, socket: { remoteAddress: '100.64.0.9' } };
+
+  for (let i = 0; i < 3; i++) mw(internal, {} as any, next);
+  assert.equal(lines.length, 0, 'requests without X-Forwarded-For are ignored');
+
+  mw(edge, {} as any, next);
+  mw(edge, {} as any, next);
+  mw(internal, {} as any, next);
   assert.equal(lines.length, 1);
-  assert.equal(nexts, 3);
+  assert.equal(lines[0], 'proxy check: req.ip=203.0.x.x socket=100.64.x.x xff_hops=1');
+  assert.equal(nexts, 6, 'every request still continues down the chain');
 });

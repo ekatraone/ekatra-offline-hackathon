@@ -1,5 +1,5 @@
 /**
- * One-time log line to confirm the proxy chain in front of the deployed service is one hop
+ * One-time log line (for the first request that came through the edge proxy) to confirm the proxy chain in front of the deployed service is one hop
  * (so `trust proxy` = 1 makes req.ip the real client). Addresses are truncated to the first two
  * octets / hextets, and only the number of X-Forwarded-For entries is reported.
  */
@@ -25,7 +25,9 @@ export function describeProxyChain(req: Pick<Request, 'ip' | 'headers' | 'socket
 export function logProxyChainOnce(log: (msg: string) => void = (m) => logger.info(m)) {
   let done = false;
   return (req: Request, _res: Response, next: NextFunction) => {
-    if (!done) {
+    // Only a request carrying X-Forwarded-For has been through the public edge; the platform's
+    // internal health checks arrive without one and would tell us nothing about the real chain.
+    if (!done && req.headers['x-forwarded-for']) {
       done = true;
       log(describeProxyChain(req));
     }
