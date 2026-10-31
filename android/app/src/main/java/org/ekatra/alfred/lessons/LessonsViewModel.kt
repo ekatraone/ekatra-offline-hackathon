@@ -55,6 +55,8 @@ data class QuizState(
 
 data class LessonsUiState(
     val configured: Boolean = false,
+    /** A server is known but there is no token yet. */
+    val needsToken: Boolean = false,
     val online: Boolean = true,
     val bundles: List<LessonBundle> = emptyList(),
     val completed: Set<String> = emptySet(),
@@ -99,6 +101,7 @@ class LessonsViewModel @Inject constructor(
         const val LANGUAGE = "en"
         /** Module text handed to the on-device model; the context is only 2048 tokens. */
         const val LESSON_CONTEXT_CHARS = 1200
+
         /** Chat keeps the persona's 120 s; a quiz explanation that takes longer than this is not worth waiting for. */
         const val EXPLAIN_FIRST_TOKEN_MS = 25_000L
         /** If chat or host mode is generating, wait this long for the shared inference Mutex, then fall back. */
@@ -106,7 +109,7 @@ class LessonsViewModel @Inject constructor(
     }
 
     private val formatter = PromptFormatter()
-    private val _ui = MutableStateFlow(LessonsUiState(configured = manager.isConfigured))
+    private val _ui = MutableStateFlow(LessonsUiState(configured = manager.isConfigured, needsToken = manager.needsToken))
     val uiState: StateFlow<LessonsUiState> = _ui.asStateFlow()
 
     /** Test seams. */
@@ -142,6 +145,8 @@ class LessonsViewModel @Inject constructor(
             }
         }
         viewModelScope.launch { manager.status.collect { s -> _ui.update { it.copy(syncStatus = s) } } }
+        // The token can change under us: a join, a sign-out, or a 401 clearing an expired one.
+        viewModelScope.launch { manager.configChanges.collect { refreshConfig() } }
         viewModelScope.launch {
             // Fires on every reconnect, so queued work goes out within seconds of coming back online.
             var wasOnline: Boolean? = null
@@ -169,6 +174,7 @@ class LessonsViewModel @Inject constructor(
         if (report.status == SyncStatus.UNAUTHORIZED) {
             _ui.update { it.copy(notice = "Lessons sign-in expired. Ask for a new token.") }
         }
+        refreshConfig()
         _ui.update { it.copy(requesting = false) }
         refreshPendingTopics()
     }
@@ -176,6 +182,10 @@ class LessonsViewModel @Inject constructor(
     private suspend fun refreshPendingTopics() {
         val topics = manager.pendingRequestTopics()
         _ui.update { it.copy(pendingTopics = topics) }
+    }
+
+    private fun refreshConfig() {
+        _ui.update { it.copy(configured = manager.isConfigured, needsToken = manager.needsToken) }
     }
 
     fun dismissNotice() = _ui.update { it.copy(notice = null) }

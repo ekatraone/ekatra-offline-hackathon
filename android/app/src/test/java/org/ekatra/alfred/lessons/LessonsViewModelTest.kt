@@ -55,6 +55,7 @@ class LessonsViewModelTest {
     fun tearDown() { Dispatchers.resetMain(); dir.deleteRecursively() }
 
     private fun newVm(config: SyncConfig = SyncConfig("http://x", "tok")): LessonsViewModel {
+        // (A config built with a FakeTokenStore lets a test join, expire and sign out.)
         manager = LearnerSyncManager(api, dao, bundles, progress, config, net).also {
             it.ioDispatcher = Dispatchers.Unconfined
         }

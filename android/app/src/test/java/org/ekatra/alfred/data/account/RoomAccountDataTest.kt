@@ -34,6 +34,8 @@ class RoomAccountDataTest {
     private lateinit var lessons: LessonStore
     private lateinit var progress: LessonProgressStore
     private lateinit var data: RoomAccountData
+    private lateinit var tokens: org.ekatra.alfred.lessons.FakeTokenStore
+    private lateinit var config: org.ekatra.alfred.lessons.SyncConfig
 
     @Before
     fun setup() {
@@ -44,7 +46,9 @@ class RoomAccountDataTest {
         queue = FakeQueueDao()
         lessons = LessonStore(File(dir, "lessons"))
         progress = LessonProgressStore(File(dir, "lesson_progress.json"))
-        data = RoomAccountData(chats, profiles, settings, queue, lessons, progress)
+        tokens = org.ekatra.alfred.lessons.FakeTokenStore("joined-token", "learner-1")
+        config = org.ekatra.alfred.lessons.SyncConfig("http://x", "", tokens)
+        data = RoomAccountData(chats, profiles, settings, queue, lessons, progress, config)
     }
 
     @After
@@ -96,6 +100,17 @@ class RoomAccountDataTest {
 
         assertFalse(File(dir, "lessons/c1").exists())
         assertEquals(0, File(dir, "lessons").listFiles()?.size ?: 0)
+    }
+
+    @Test
+    fun `the lessons token goes with the account, so the next person has to sign in again`() = runBlocking {
+        assertTrue(config.isConfigured)
+
+        data.clear("uid1")
+
+        assertNull(tokens.token); assertNull(tokens.learner)
+        assertFalse(config.isConfigured)
+        assertTrue(config.needsToken)
     }
 
     @Test

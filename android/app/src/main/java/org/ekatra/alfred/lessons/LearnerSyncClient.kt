@@ -97,21 +97,17 @@ class LearnerSyncClient internal constructor(
         return out.toByteArray()
     }
 
-    private suspend fun <T> call(
-        method: String,
-        path: String,
-        readTimeoutMs: Int,
-        body: Any?,
-        type: Class<T>
-    ): ApiResult<T> = withContext(Dispatchers.IO) {
-        if (!config.isConfigured) return@withContext ApiResult.Rejected(0, "Sync is not configured")
+    private class Raw(val code: Int, val text: String)
+
+    /** One HTTP exchange. Throws IOException on a network failure. */
+    private fun send(method: String, path: String, readTimeoutMs: Int, body: Any?, authenticated: Boolean): Raw {
         var conn: HttpURLConnection? = null
         try {
             conn = openConnection(URL(config.baseUrl.trimEnd('/') + path)).apply {
                 requestMethod = method
                 connectTimeout = CONNECT_TIMEOUT_MS
                 readTimeout = readTimeoutMs
-                setRequestProperty("Authorization", "Bearer ${config.token}")
+                if (authenticated) setRequestProperty("Authorization", "Bearer ${config.token}")
                 setRequestProperty("Accept", "application/json")
                 if (body != null) {
                     doOutput = true
@@ -121,15 +117,28 @@ class LearnerSyncClient internal constructor(
             }
             val code = conn.responseCode
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-            val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
-            interpret(code, text, type)
+            return Raw(code, stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty())
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
+    private suspend fun <T> call(
+        method: String,
+        path: String,
+        readTimeoutMs: Int,
+        body: Any?,
+        type: Class<T>
+    ): ApiResult<T> = withContext(Dispatchers.IO) {
+        if (!config.isConfigured) return@withContext ApiResult.Rejected(0, "Sync is not configured")
+        try {
+            val raw = send(method, path, readTimeoutMs, body, authenticated = true)
+            interpret(raw.code, raw.text, type)
         } catch (e: IOException) {
             ApiResult.Retryable(e.message ?: e.javaClass.simpleName)
         } catch (e: RuntimeException) {
             // Malformed JSON or an unexpected envelope; the server may recover, so do not drop the item.
             ApiResult.Retryable("Bad response: ${e.message}")
-        } finally {
-            conn?.disconnect()
         }
     }
 

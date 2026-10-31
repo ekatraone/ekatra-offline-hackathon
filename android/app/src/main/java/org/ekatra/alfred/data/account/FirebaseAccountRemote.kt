@@ -14,6 +14,7 @@ import org.ekatra.alfred.data.sync.SyncManager
 import org.ekatra.alfred.lessons.LearnerSyncManager
 import org.ekatra.alfred.lessons.LessonProgressStore
 import org.ekatra.alfred.lessons.LessonStore
+import org.ekatra.alfred.lessons.SyncConfig
 import javax.inject.Inject
 
 /** Firestore and Firebase Auth side of account deletion. */
@@ -53,7 +54,8 @@ class RoomAccountData @Inject constructor(
     private val settings: AppSettings,
     private val syncQueue: SyncQueueDao,
     private val lessons: LessonStore,
-    private val lessonProgress: LessonProgressStore
+    private val lessonProgress: LessonProgressStore,
+    private val lessonsConfig: SyncConfig
 ) : LocalAccountData {
 
     override suspend fun clear(uid: String) {
@@ -67,6 +69,8 @@ class RoomAccountData @Inject constructor(
         withContext(Dispatchers.IO) {
             lessons.clear()
             lessonProgress.clear()
+            // The learner token goes too, so the next person on this phone has to sign in for lessons.
+            lessonsConfig.clearAll()
         }
     }
 }

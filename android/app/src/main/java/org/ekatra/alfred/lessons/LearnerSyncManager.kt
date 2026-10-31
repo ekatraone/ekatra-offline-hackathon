@@ -94,6 +94,15 @@ class LearnerSyncManager @Inject constructor(
 
     val isConfigured: Boolean get() = config.isConfigured
 
+    /** A server is known but there is no token yet: the learner has to sign in. */
+    val needsToken: Boolean get() = config.needsToken
+
+    /** The token in use is one exchanged after a Firebase sign-in (not the build-time one). */
+    val hasStoredToken: Boolean get() = config.hasStoredToken
+
+    /** Changes whenever the stored token is set or cleared. */
+    val configChanges: StateFlow<Int> get() = config.changes
+
     /** Rows waiting to go to the server (events + lesson requests). */
     val pendingCount: Flow<Int> = queue.countByTypes(QUEUE_TYPES)
 
@@ -158,6 +167,39 @@ class LearnerSyncManager @Inject constructor(
 
     fun dismissFailedRequest(clientRequestId: String) = progress.removeFailedRequest(clientRequestId)
 
+    // ---- tester sign-in ----
+
+    /** Forget the stored token and everything it fetched or queued (Firebase sign-out). */
+    suspend fun signOut() {
+        config.clearAll() // first, so nothing more goes out under the old token
+        clearLocalLearnerData()
+        _status.value = if (config.isConfigured) SyncStatus.IDLE else SyncStatus.NOT_CONFIGURED
+    }
+
+    /** Downloaded lessons and their images, local progress, and the unsynced learner rows (not analytics). */
+    suspend fun clearLocalLearnerData() {
+        queue.deleteByType(TYPE_LEARNER_EVENT)
+        queue.deleteByType(TYPE_LESSON_REQUEST)
+        withContext(ioDispatcher) {
+            bundles.clear()
+            progress.clear()
+        }
+        missingImageUrls.clear()
+        refetchedVersion.clear()
+    }
+
+    /**
+     * A 401 with a token this tester joined with means it expired: drop it so the join form shows again.
+     * The queue and lessons stay, so the same person rejoining loses nothing. A build-time token is left alone;
+     * it keeps the "sign-in expired" behaviour.
+     */
+    private fun onUnauthorized() {
+        if (config.hasStoredToken) {
+            config.clearToken()
+            _status.value = SyncStatus.NOT_CONFIGURED
+        }
+    }
+
     // ---- sync ----
 
     /** What the events step found. [stop] is set on a 401, which ends the whole sync. */
@@ -181,12 +223,13 @@ class LearnerSyncManager @Inject constructor(
             _status.value = SyncStatus.RUNNING
             withContext(ioDispatcher) { syncEvents() }
         }
-        events.stop?.let { _status.value = it.status; return it }
+        events.stop?.let { _status.value = it.status; onUnauthorized(); return it }
         // Events are done: the chip can say Synced now, whatever generation below takes.
         _status.value = if (events.error != null && events.resolved == 0) SyncStatus.ERROR else SyncStatus.SYNCED
 
         val report = generationLock.withLock { withContext(ioDispatcher) { syncLessons(events) } }
         if (report.status == SyncStatus.UNAUTHORIZED || report.status == SyncStatus.ERROR) _status.value = report.status
+        if (report.status == SyncStatus.UNAUTHORIZED) onUnauthorized()
         return report
     }
 

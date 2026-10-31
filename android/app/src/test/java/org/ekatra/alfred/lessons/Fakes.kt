@@ -144,3 +144,48 @@ fun sampleBundleWithImages(courseId: String = "course-1", lessonId: String = "le
         lessons = b.lessons.map { it.copy(imageUrl = LESSON_IMAGE_URL) } + review
     )
 }
+
+class FakeTokenStore(var token: String? = null, var learner: String? = null) : TokenStore {
+    override fun token() = token
+    override fun learnerId() = learner
+    override fun save(token: String, learnerId: String?) { this.token = token; if (learnerId != null) learner = learnerId }
+    override fun clearToken() { token = null }
+    override fun clearAll() { token = null; learner = null }
+}
+
+/** An in-memory SharedPreferences, enough for PrefsTokenStore. */
+class FakePrefs : android.content.SharedPreferences {
+    val data = mutableMapOf<String, Any?>()
+
+    override fun getAll(): MutableMap<String, *> = data.toMutableMap()
+    override fun getString(key: String, defValue: String?) = data[key] as? String ?: defValue
+    override fun getStringSet(key: String, defValues: MutableSet<String>?) = defValues
+    override fun getInt(key: String, defValue: Int) = data[key] as? Int ?: defValue
+    override fun getLong(key: String, defValue: Long) = data[key] as? Long ?: defValue
+    override fun getFloat(key: String, defValue: Float) = data[key] as? Float ?: defValue
+    override fun getBoolean(key: String, defValue: Boolean) = data[key] as? Boolean ?: defValue
+    override fun contains(key: String) = data.containsKey(key)
+    override fun registerOnSharedPreferenceChangeListener(l: android.content.SharedPreferences.OnSharedPreferenceChangeListener?) {}
+    override fun unregisterOnSharedPreferenceChangeListener(l: android.content.SharedPreferences.OnSharedPreferenceChangeListener?) {}
+
+    override fun edit(): android.content.SharedPreferences.Editor = object : android.content.SharedPreferences.Editor {
+        private val pending = mutableMapOf<String, Any?>()
+        private val removed = mutableSetOf<String>()
+        private var clearAll = false
+        override fun putString(key: String, value: String?) = apply { pending[key] = value }
+        override fun putStringSet(key: String, values: MutableSet<String>?) = apply { pending[key] = values }
+        override fun putInt(key: String, value: Int) = apply { pending[key] = value }
+        override fun putLong(key: String, value: Long) = apply { pending[key] = value }
+        override fun putFloat(key: String, value: Float) = apply { pending[key] = value }
+        override fun putBoolean(key: String, value: Boolean) = apply { pending[key] = value }
+        override fun remove(key: String) = apply { removed += key }
+        override fun clear() = apply { clearAll = true }
+        override fun commit(): Boolean {
+            if (clearAll) data.clear()
+            removed.forEach { data.remove(it) }
+            data.putAll(pending)
+            return true
+        }
+        override fun apply() { commit() }
+    }
+}
