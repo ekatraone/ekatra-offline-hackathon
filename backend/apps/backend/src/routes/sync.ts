@@ -17,7 +17,7 @@ import jwt from 'jsonwebtoken';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import rateLimit from 'express-rate-limit';
 import { logger } from '../lib/logger.js';
-import { FirebaseAuthLike, getFirebaseAuth } from '../lib/firebaseAdmin.js';
+import { AUTH_NOT_CONFIGURED, FirebaseAuthLike, getFirebaseAuth } from '../lib/firebaseAdmin.js';
 import {
   E164_RE,
   MAX_NAME_LENGTH,
@@ -271,8 +271,12 @@ export function createSyncRouter({ db, generator, firebase = getFirebaseAuth }: 
     async (req: Request, res: Response) => {
       try {
         const auth = firebase();
+        if (!auth) {
+          res.status(503).json(AUTH_NOT_CONFIGURED);
+          return;
+        }
         const secret = process.env.JWT_SECRET;
-        if (!auth || !secret) {
+        if (!secret) {
           res.status(503).json({ success: false, error: 'Sign-in is not available right now' });
           return;
         }
@@ -337,7 +341,7 @@ export function createSyncRouter({ db, generator, firebase = getFirebaseAuth }: 
     try {
       const auth = firebase();
       if (!auth) {
-        res.status(503).json({ success: false, error: 'Account deletion is not available right now' });
+        res.status(503).json(AUTH_NOT_CONFIGURED);
         return;
       }
       const idToken = req.body?.idToken;

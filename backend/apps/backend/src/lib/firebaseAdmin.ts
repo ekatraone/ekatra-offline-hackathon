@@ -10,6 +10,13 @@
 import admin from 'firebase-admin';
 import { logger } from './logger.js';
 
+/**
+ * The exact 503 body every sign-in route returns when Firebase is not configured on the server.
+ * The app reads it: on the delete routes it means "nothing to erase", since without Firebase no
+ * learner can have been created through the exchange.
+ */
+export const AUTH_NOT_CONFIGURED = { success: false, error: 'auth_not_configured' } as const;
+
 /** The slice of firebase-admin's Auth that sign-in uses (also what tests stub). */
 export interface FirebaseAuthLike {
   verifyIdToken(idToken: string, checkRevoked?: boolean): Promise<Record<string, any>>;
