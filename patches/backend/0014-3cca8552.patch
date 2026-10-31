@@ -1,0 +1,55 @@
+diff --git a/apps/backend/src/flows/conversationFSM.ts b/apps/backend/src/flows/conversationFSM.ts
+index 1e5f7c4b..e89e0065 100644
+--- a/apps/backend/src/flows/conversationFSM.ts
++++ b/apps/backend/src/flows/conversationFSM.ts
+@@ -514,7 +514,7 @@ export class ConversationFSM {
+     const firstName = (learner.name || '').split(' ')[0];
+     const nameStr = firstName ? `, ${firstName}` : '';
+     await messaging.sendText(learner.phone, {
+-      text: `🔄 Alfred is generating your personalised *${ctx.data.topic}* course${nameStr}...\n\nThis takes about ${process.env.COURSE_SIZE === 'micro' ? '1-2 minutes' : '30 seconds'}. I'll message you when it's ready! ✨`,
++      text: `🔄 I'm creating your course with pictures — usually a minute or two. I'll message you here as soon as it's ready. ✨`,
+     });
+ 
+     // Generate in background (don't await in the webhook response).
+@@ -1068,10 +1068,15 @@ export class ConversationFSM {
+         style: data.style,
+       });
+ 
+-      // Notify learner
+-      await messaging.sendText(learner.phone, {
+-        text: `✅ Your course *${course.title}* is ready!\n\nIt has ${lessons.length} lessons. Let's start your first one! 🚀`,
+-      });
++      // Notify learner — with the cover picture when one was generated (best-effort)
++      const readyText = `✅ Your course *${course.title}* is ready!\n\nIt has ${lessons.length} lessons. Let's start your first one! 🚀`;
++      const coverUrl = (await db.courses.findById(course.id).catch(() => null))?.settings?.coverImageUrl;
++      const coverSent = coverUrl
++        ? await messaging.sendImage(learner.phone, { imageUrl: coverUrl, caption: readyText }).catch(() => null)
++        : null;
++      if (!coverSent?.success) {
++        await messaging.sendText(learner.phone, { text: readyText });
++      }
+ 
+       // Send the first lesson immediately — use the enrollment we just created
+       const courseDelivery = await this.getDeliveryService();
+diff --git a/packages/delivery/src/services/courseDelivery.ts b/packages/delivery/src/services/courseDelivery.ts
+index 51ed8db1..13117e50 100644
+--- a/packages/delivery/src/services/courseDelivery.ts
++++ b/packages/delivery/src/services/courseDelivery.ts
+@@ -167,6 +167,17 @@ export class CourseDeliveryService {
+       // Deliberate pause so the header lands before the content
+       await delay(1200);
+ 
++      // AI-generated illustration: picture first, then the text. Best-effort — a failed
++      // image never blocks the lesson. Telegram has its own illustration flow below.
++      if (lesson.media_url && lesson.content_type === 'text') {
++        const { isTelegramRecipient } = await import('@ekatra/messaging');
++        if (!isTelegramRecipient(phone)) {
++          const sentImage = await messaging.sendImage(phone, { imageUrl: lesson.media_url }).catch((err: any) => ({ success: false, error: err?.message }));
++          if (!sentImage?.success) logger.warn(`Lesson image not sent (${lesson.id}): ${sentImage?.error}`);
++          else await delay(800);
++        }
++      }
++
+       // Lesson title + content
+       await checkedSend(messaging.sendText(phone, {
+         text: `*${lesson.title}*\n\n${markdownToWhatsApp(lesson.content)}`,
