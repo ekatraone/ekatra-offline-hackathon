@@ -29,7 +29,8 @@ if (!secret) {
   process.exit(1);
 }
 
-const { db } = await import('@ekatra/database');
+const { initializeDatabase, db } = await import('@ekatra/database');
+initializeDatabase({ connectionString: process.env.DATABASE_URL });
 
 let org = await db.organizations.getDefault();
 if (!org) {

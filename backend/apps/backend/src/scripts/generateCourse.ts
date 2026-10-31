@@ -16,7 +16,8 @@ if (!topic) {
   process.exit(1);
 }
 
-const { db } = await import('@ekatra/database');
+const { initializeDatabase, db } = await import('@ekatra/database');
+initializeDatabase({ connectionString: process.env.DATABASE_URL });
 const { courseGenerator } = await import('../services/courseGenerator.js');
 
 const org = await db.organizations.getDefault();
