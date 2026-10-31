@@ -4,6 +4,8 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { createSyncRouter } from '../sync.js';
 
@@ -60,6 +62,33 @@ test('media: has its own per-IP limit of 120 requests per minute', async () => {
     if (res.status === 429) limited++;
   }
   assert.ok(limited >= 1, 'expected a 429 once the per-minute limit is exceeded');
+});
+
+test('media limiter keys on the real client behind a trusted proxy (X-Forwarded-For)', async () => {
+  const db = { async raw() { return { rows: [{ mime: 'image/jpeg', bytes: JPEG }] }; } };
+  const app = express();
+  app.set('trust proxy', 1);
+  app.use('/api/sync', createSyncRouter({ db, generator: { generate: async () => ({ id: 'x' }) } }));
+  const proxied = await new Promise<Server>((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+  const url = `http://127.0.0.1:${(proxied.address() as AddressInfo).port}/api/sync/media/${ID}`;
+  try {
+    // One noisy client exhausts its own budget...
+    let noisyBlocked = false;
+    for (let i = 0; i < 125; i++) {
+      const res = await fetch(url, { headers: { 'X-Forwarded-For': '203.0.113.7' } });
+      if (res.status === 429) noisyBlocked = true;
+    }
+    assert.equal(noisyBlocked, true);
+    // ...but a different client behind the same proxy is unaffected (e.g. Twilio's fetch).
+    assert.equal((await fetch(url, { headers: { 'X-Forwarded-For': '198.51.100.9' } })).status, 200);
+  } finally {
+    proxied.close();
+  }
+});
+
+test('index.ts trusts one proxy hop so per-IP limiters see real clients', () => {
+  const source = readFileSync(fileURLToPath(new URL('../../index.ts', import.meta.url)), 'utf-8');
+  assert.match(source, /app\.set\('trust proxy', 1\);/);
 });
 
 test('media: the rest of the sync API still requires auth', async () => {
