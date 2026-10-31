@@ -1,0 +1,231 @@
+diff --git a/apps/backend/src/lib/llm.ts b/apps/backend/src/lib/llm.ts
+index f6f5990e..0baa35af 100644
+--- a/apps/backend/src/lib/llm.ts
++++ b/apps/backend/src/lib/llm.ts
+@@ -10,7 +10,7 @@
+ 
+ import { anthropicClient } from './anthropicClient.js';
+ import { azureOpenAI } from './azureOpenAI.js';
+-import { metaModelClient } from './metaModelClient.js';
++import { metaModelClient, metaModelId } from './metaModelClient.js';
+ 
+ export interface LlmChatParams {
+   messages: Array<{ role: string; content: string }>;
+@@ -24,18 +24,45 @@ export function llmAvailable(): boolean {
+   return anthropicClient.isAvailable() || azureOpenAI.isAvailable() || metaModelClient.isAvailable();
+ }
+ 
++export interface LlmSource {
++  provider: 'anthropic' | 'azure' | 'meta';
++  model: string;
++}
++
++/**
++ * Records which provider and model actually answered, on a non-enumerable property so the
++ * completion still serializes as before. Read it back with `llmSource()`.
++ */
++function tag(completion: any, source: LlmSource): any {
++  if (completion && typeof completion === 'object') {
++    Object.defineProperty(completion, '__llmSource', { value: source, enumerable: false, configurable: true });
++  }
++  return completion;
++}
++
++export function llmSource(completion: any): LlmSource | undefined {
++  return completion?.__llmSource;
++}
++
++const reportedModel = (completion: any, fallback: string) =>
++  typeof completion?.model === 'string' && completion.model ? completion.model : fallback;
++
+ export async function llmChat(params: LlmChatParams): Promise<any> {
+   if (params.provider === 'meta') {
+-    return metaModelClient.createChatCompletion(params);
++    const c = await metaModelClient.createChatCompletion(params);
++    return tag(c, { provider: 'meta', model: metaModelId() });
+   }
+   if (anthropicClient.isAvailable()) {
+-    return anthropicClient.createChatCompletion(params);
++    const c = await anthropicClient.createChatCompletion(params);
++    return tag(c, { provider: 'anthropic', model: reportedModel(c, process.env.AZURE_ANTHROPIC_MODEL || 'claude-sonnet-4-5') });
+   }
+   if (azureOpenAI.isAvailable()) {
+-    return azureOpenAI.createChatCompletion(params);
++    const c = await azureOpenAI.createChatCompletion(params);
++    return tag(c, { provider: 'azure', model: reportedModel(c, process.env.AZURE_OPENAI_DEPLOYMENT || 'azure-openai') });
+   }
+   if (metaModelClient.isAvailable()) {
+-    return metaModelClient.createChatCompletion(params);
++    const c = await metaModelClient.createChatCompletion(params);
++    return tag(c, { provider: 'meta', model: metaModelId() });
+   }
+   throw new Error('No LLM configured — set AZURE_ANTHROPIC_API_KEY, AZURE_OPENAI_API_KEY or MODEL_API_KEY');
+ }
+diff --git a/apps/backend/src/services/courseGenerator.ts b/apps/backend/src/services/courseGenerator.ts
+index 1f903a14..399a661d 100644
+--- a/apps/backend/src/services/courseGenerator.ts
++++ b/apps/backend/src/services/courseGenerator.ts
+@@ -5,8 +5,10 @@
+  * then persists it into the database (courses + lessons + quiz_questions tables).
+  */
+ 
+-import { llmChat } from '../lib/llm.js';
++import { llmChat, llmSource } from '../lib/llm.js';
+ import { logger } from '../lib/logger.js';
++import { metaModelClient, metaModelId } from '../lib/metaModelClient.js';
++import { generateCourseImages, publicBaseUrl, ImageJob } from './courseImages.js';
+ 
+ const getDb = () => import('@ekatra/database').then((m) => m.db);
+ 
+@@ -39,6 +41,7 @@ interface GeneratedModule {
+   title: string;
+   content: string;
+   quiz: GeneratedQuiz;
++  imagePrompt?: string;
+ }
+ 
+ interface GeneratedDay {
+@@ -50,11 +53,38 @@ interface GeneratedDay {
+ interface GeneratedCourse {
+   title: string;
+   description: string;
++  coverImagePrompt?: string;
++  /** Provider and model that actually produced the text; stamped into settings.generator. */
++  generator?: { provider: string; model: string };
+   days: GeneratedDay[];
+ }
+ 
+ export type CourseSize = 'micro' | 'standard';
+ 
++/**
++ * Settings stored on a generated course. Every AI course records what produced it
++ * (the phone only downloads courses that have a generator): the provider and model that
++ * actually answered, or the forced provider when the answer carried no attribution.
++ */
++export function buildCourseSettings(
++  courseData: { days: unknown[]; generator?: { provider: string; model: string } },
++  language: string,
++  size: CourseSize,
++  provider?: 'meta',
++) {
++  return {
++    language,
++    aiGenerated: true,
++    totalDays: courseData.days.length,
++    size,
++    ...(courseData.generator
++      ? { generator: courseData.generator }
++      : provider === 'meta'
++        ? { generator: { provider: 'meta', model: metaModelId() } }
++        : {}),
++  };
++}
++
+ export function resolveCourseSize(size?: CourseSize): CourseSize {
+   if (size) return size;
+   return process.env.COURSE_SIZE === 'micro' ? 'micro' : 'standard';
+@@ -170,6 +200,7 @@ Rules:
+ - Each module MUST have exactly ONE quiz question (4 options, one correct answer A/B/C/D).
+ - Each day MUST have exactly ${reviewCount} comprehension questions that test understanding across all modules that day.
+ - NO flashcards — do not include any flashcard fields.
++- Give the course a "coverImagePrompt" and every module an "imagePrompt": one plain sentence describing a simple illustration of the idea (objects and scenes only; the image must contain no words, letters or numbers).
+ - Respond ONLY with valid JSON. No markdown fences, no commentary.${langLine}`;
+ 
+     const userPrompt = `Create a ${numDays}-day micro-course about: "${topic}"${goalLine}
+@@ -180,6 +211,7 @@ Return this exact JSON structure:
+ {
+   "title": "Course title (max 60 characters)",
+   "description": "What learners will gain (2-3 sentences)",
++  "coverImagePrompt": "One sentence describing a cover illustration for the whole course.",
+   "days": [
+     {
+       "dayNumber": 1,
+@@ -187,6 +219,7 @@ Return this exact JSON structure:
+         {
+           "title": "Module title (max 60 characters)",
+           "content": "Module body (${wordRange}). Use \\n\\n for paragraphs. Use *bold* for key terms.",
++          "imagePrompt": "One sentence describing an illustration for this module.",
+           "quiz": {
+             "question": "Question testing understanding of this module?",
+             "options": ["Option A text", "Option B text", "Option C text", "Option D text"],
+@@ -232,6 +265,9 @@ Ensure comprehensionQuestions has exactly ${reviewCount} items per day.`;
+           throw new Error('LLM returned invalid course structure');
+         }
+ 
++        const source = llmSource(completion);
++        if (source) parsed.generator = { provider: source.provider, model: source.model };
++
+         const totalModules = parsed.days.reduce((sum, d) => sum + (d.modules?.length ?? 0), 0);
+         logger.info(`📝 LLM generated ${parsed.days.length} days / ${totalModules} modules for "${parsed.title}"`);
+         return parsed;
+@@ -245,6 +281,27 @@ Ensure comprehensionQuestions has exactly ${reviewCount} items per day.`;
+     throw new Error('Course generation failed after 3 attempts');
+   }
+ 
++  /** Best-effort: never throws, so a lesson is never lost to an image problem. */
++  private async attachImages(db: any, courseId: string, jobs: ImageJob[]): Promise<void> {
++    if (!jobs.length || process.env.COURSE_IMAGES === 'off' || !metaModelClient.isAvailable()) return;
++    try {
++      const baseUrl = publicBaseUrl();
++      if (!baseUrl) {
++        logger.warn('Skipping course images: set PUBLIC_BASE_URL (or WEBHOOK_BASE_URL) so image URLs are absolute');
++        return;
++      }
++      const started = Date.now();
++      const result = await generateCourseImages(courseId, jobs, {
++        db,
++        createImage: (prompt) => metaModelClient.createImage(prompt),
++        baseUrl,
++      });
++      logger.info(`🖼️  Images for course ${courseId}: ${result.stored} stored, ${result.failed} failed in ${Date.now() - started}ms`);
++    } catch (err: any) {
++      logger.warn(`Image generation skipped for course ${courseId}: ${err?.message}`);
++    }
++  }
++
+   private async saveToDB(
+     courseData: GeneratedCourse,
+     organizationId: string,
+@@ -260,18 +317,14 @@ Ensure comprehensionQuestions has exactly ${reviewCount} items per day.`;
+       title: courseData.title,
+       description: courseData.description,
+       status: 'published',
+-      settings: {
+-        language,
+-        aiGenerated: true,
+-        totalDays: courseData.days.length,
+-        size,
+-        ...(provider === 'meta'
+-          ? { generator: { provider: 'meta', model: process.env.META_MODEL_ID || 'muse-spark-1.3' } }
+-          : {}),
+-      },
++      settings: buildCourseSettings(courseData, language, size, provider),
+     });
+ 
+     // 2. Flatten days → modules, save each as a lesson row with day_number
++    const imageJobs: ImageJob[] = [];
++    if (courseData.coverImagePrompt) {
++      imageJobs.push({ kind: 'cover', lessonId: null, prompt: courseData.coverImagePrompt });
++    }
+     let sequenceOrder = 1;
+     for (const day of courseData.days) {
+       for (const moduleData of day.modules) {
+@@ -285,6 +338,10 @@ Ensure comprehensionQuestions has exactly ${reviewCount} items per day.`;
+           dayNumber: day.dayNumber,
+         });
+ 
++        if (moduleData.imagePrompt) {
++          imageJobs.push({ kind: 'module', lessonId: lesson.id, prompt: moduleData.imagePrompt });
++        }
++
+         if (moduleData.quiz) {
+           const q = moduleData.quiz;
+           await db.quiz.createQuestion({
+@@ -334,6 +391,7 @@ Ensure comprehensionQuestions has exactly ${reviewCount} items per day.`;
+     const totalModules = courseData.days.reduce((sum, d) => sum + d.modules.length, 0);
+     logger.info(`✅ Saved ${courseData.days.length} days / ${totalModules} modules for course ${course.id}`);
+ 
++    await this.attachImages(db, course.id, imageJobs);
+     return course;
+   }
+ }
