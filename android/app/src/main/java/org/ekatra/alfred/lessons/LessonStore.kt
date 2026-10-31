@@ -45,14 +45,26 @@ class LessonStore(private val dir: File) {
         // Bundles are files; each course's images live in a directory next to them.
         dir.listFiles()?.forEach { it.deleteRecursively() }
         _bundles.value = emptyList()
-        _imageRevision.value += 1
+        _imageStamps.value = emptyMap()
+        _imagesPending.value = emptySet()
     }
 
     // ---- images: <dir>/<courseId>/cover.jpg and <dir>/<courseId>/<lessonId>.jpg ----
 
-    private val _imageRevision = MutableStateFlow(0)
-    /** Bumps whenever an image file appears or goes, so the UI knows to decode again. */
-    val imageRevision: StateFlow<Int> = _imageRevision
+    private val _imageStamps = MutableStateFlow<Map<String, Long>>(emptyMap())
+    /**
+     * Per image file, a counter that changes each time THAT file is written. The UI keys each image on
+     * its own stamp, so a new download re-decodes only the image that changed, not every image on screen.
+     */
+    val imageStamps: StateFlow<Map<String, Long>> = _imageStamps
+
+    private val _imagesPending = MutableStateFlow<Set<String>>(emptySet())
+    /** Paths of images a download is about to attempt or is attempting right now. Drives the placeholder. */
+    val imagesPending: StateFlow<Set<String>> = _imagesPending
+
+    fun setImagesPending(paths: Set<String>) { _imagesPending.value = paths }
+
+    fun imageDownloadFinished(path: String) { _imagesPending.value = _imagesPending.value - path }
 
     fun coverFile(courseId: String): File = File(imageDir(courseId), "cover.jpg")
 
@@ -73,7 +85,13 @@ class LessonStore(private val dir: File) {
             target.delete()
             check(tmp.renameTo(target)) { "Could not move ${tmp.name} into place" }
         }
-        _imageRevision.value += 1
+        _imageStamps.value = _imageStamps.value + (target.path to ((_imageStamps.value[target.path] ?: 0L) + 1L))
+    }
+
+    /** Remove one image file, e.g. when the server replaced it with a different one. */
+    @Synchronized
+    fun deleteImage(target: File) {
+        if (target.delete()) _imageStamps.value = _imageStamps.value + (target.path to ((_imageStamps.value[target.path] ?: 0L) + 1L))
     }
 
     /** Newest first. Unreadable files are skipped, not fatal. */

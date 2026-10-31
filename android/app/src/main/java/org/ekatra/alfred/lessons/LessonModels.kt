@@ -75,7 +75,9 @@ data class MeCourse(
     val language: String? = null,
     val status: String? = null,
     val progress: Double? = null,
-    val generator: Generator? = null
+    val generator: Generator? = null,
+    /** Hash of the server's current bundle, covering image ids; differs from a stored bundle's `version` when images attached late. */
+    val bundleVersion: String? = null
 )
 
 data class MeResponse(

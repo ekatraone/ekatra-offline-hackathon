@@ -44,7 +44,7 @@ fun LessonsApp(onExit: () -> Unit, vm: LessonsViewModel = hiltViewModel()) {
                 is LessonsScreen.Lesson -> {
                     val lesson = vm.findLesson(screen.courseId, screen.lessonId)
                     if (lesson == null) HomeFallback(vm) else when (screen.stage) {
-                        Stage.READ -> ReadScreen(lesson, screen.courseId, ui.imageRevision, vm, onStartQuiz = vm::startQuiz)
+                        Stage.READ -> ReadScreen(lesson, screen.courseId, ui, vm, onStartQuiz = vm::startQuiz)
                         Stage.QUIZ -> QuizScreen(ui, lesson, vm)
                         Stage.DONE -> DoneScreen(ui, lesson, vm)
                     }
@@ -116,7 +116,7 @@ internal fun pendingRequestMessage(ui: LessonsUiState): PendingMessage? = when {
     ui.pendingTopics.isEmpty() -> null
     !ui.online -> PendingMessage("Will be created when you're back online", showProgress = false)
     ui.syncStatus == SyncStatus.UNAUTHORIZED -> PendingMessage("Waiting: your lessons sign-in expired", showProgress = false)
-    else -> PendingMessage("Creating your lesson with Muse Spark… this can take a minute", showProgress = true)
+    else -> PendingMessage("Creating your lesson with Meta Muse… this can take a minute", showProgress = true)
 }
 
 internal fun failedRequestText(f: FailedLessonRequest) = "Couldn't create lesson: ${f.reason}"
@@ -201,12 +201,13 @@ private fun CourseCard(bundle: LessonBundle, ui: LessonsUiState, vm: LessonsView
     val done = lessons.count { it.id in ui.completed }
     Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            val cover = vm.coverFile(bundle.course.id)
             LessonImage(
-                file = vm.coverFile(bundle.course.id),
-                expected = !bundle.course.coverImageUrl.isNullOrBlank(),
+                file = cover,
+                pending = cover.path in ui.pendingImages,
+                stamp = ui.imageStamps[cover.path] ?: 0L,
                 contentDescription = "Cover illustration for ${bundle.course.title}",
-                revision = ui.imageRevision,
-                modifier = Modifier.fillMaxWidth().height(140.dp).clip(RoundedCornerShape(12.dp))
+                shape = Modifier.height(140.dp).clip(RoundedCornerShape(12.dp))
             )
             Text(bundle.course.title, fontWeight = FontWeight.Bold, fontSize = 17.sp)
             bundle.course.description?.takeIf { it.isNotBlank() }?.let { Text(it, fontSize = 13.sp, color = Color(0xFF475569)) }
@@ -253,25 +254,27 @@ internal fun lessonText(raw: String): AnnotatedString = buildAnnotatedString {
 }
 
 @Composable
-private fun ReadScreen(lesson: BundleLesson, courseId: String, imageRevision: Int, vm: LessonsViewModel, onStartQuiz: () -> Unit) {
+private fun ReadScreen(lesson: BundleLesson, courseId: String, ui: LessonsUiState, vm: LessonsViewModel, onStartQuiz: () -> Unit) {
     val course = vm.findCourse(courseId)
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp).navigationBarsPadding(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         if (course != null) {
+            val cover = vm.coverFile(courseId)
             LessonImage(
-                file = vm.coverFile(courseId),
-                expected = !course.coverImageUrl.isNullOrBlank(),
+                file = cover,
+                pending = cover.path in ui.pendingImages,
+                stamp = ui.imageStamps[cover.path] ?: 0L,
                 contentDescription = "Cover illustration for ${course.title}",
-                revision = imageRevision,
-                modifier = Modifier.fillMaxWidth().height(110.dp).clip(RoundedCornerShape(12.dp))
+                shape = Modifier.height(110.dp).clip(RoundedCornerShape(12.dp))
             )
         }
         Text(lesson.title, fontWeight = FontWeight.Bold, fontSize = 22.sp)
+        val moduleImage = vm.lessonImageFile(courseId, lesson.id)
         LessonImage(
-            file = vm.lessonImageFile(courseId, lesson.id),
-            expected = !lesson.imageUrl.isNullOrBlank(),
+            file = moduleImage,
+            pending = moduleImage.path in ui.pendingImages,
+            stamp = ui.imageStamps[moduleImage.path] ?: 0L,
             contentDescription = "Illustration for ${lesson.title}",
-            revision = imageRevision,
-            modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(12.dp))
+            shape = Modifier.aspectRatio(1f).clip(RoundedCornerShape(12.dp))
         )
         Text(lessonText(lesson.content.orEmpty()), fontSize = 17.sp, lineHeight = 26.sp)
         if (lesson.questions.isNotEmpty()) {

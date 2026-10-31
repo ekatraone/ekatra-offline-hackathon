@@ -70,8 +70,10 @@ data class LessonsUiState(
     val lessonTitles: Map<String, String> = emptyMap(),
     /** Lessons this learner has answered a question in on this device. */
     val answeredLessonIds: Set<String> = emptySet(),
-    /** Changes whenever a lesson image file is written, so the UI decodes it. */
-    val imageRevision: Int = 0,
+    /** Per image file, changes when that file is written; each image decodes again only on its own change. */
+    val imageStamps: Map<String, Long> = emptyMap(),
+    /** Image files with a download queued or running: only these draw a placeholder. */
+    val pendingImages: Set<String> = emptySet(),
     val screen: LessonsScreen = LessonsScreen.Home,
     val quiz: QuizState = QuizState(),
     val explain: ExplainState = ExplainState.Idle
@@ -118,7 +120,8 @@ class LessonsViewModel @Inject constructor(
 
     init {
         viewModelScope.launch { bundleStore.bundles.collect { b -> _ui.update { it.copy(bundles = b) } } }
-        viewModelScope.launch { bundleStore.imageRevision.collect { r -> _ui.update { it.copy(imageRevision = r) } } }
+        viewModelScope.launch { bundleStore.imageStamps.collect { m -> _ui.update { it.copy(imageStamps = m) } } }
+        viewModelScope.launch { bundleStore.imagesPending.collect { p -> _ui.update { it.copy(pendingImages = p) } } }
         viewModelScope.launch {
             progress.state.collect { p ->
                 _ui.update {

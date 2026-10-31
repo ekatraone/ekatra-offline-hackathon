@@ -649,4 +649,174 @@ class LearnerSyncManagerTest {
         assertTrue(api.lessonCalls.isEmpty() && api.imageCalls.isEmpty() && api.meCalls == 0)
         assertEquals(2, dao.items.size)
     }
+
+    // ---- bundleVersion refetch ----
+
+    private fun meWith(vararg c: MeCourse) { api.meResult = { ApiResult.Ok(MeResponse(courses = c.toList())) } }
+
+    @Test
+    fun `a stored bundle is refetched when the server's bundleVersion moved on, and its late images download`() = runTest {
+        // Stored without images, version v1 (what the phone got when images missed the server's budget).
+        bundles.save(sampleBundle("course-1", "lesson-1").copy(version = "v1"))
+        meWith(MeCourse("course-1", bundleVersion = "v2"))
+        api.bundleResult = { ApiResult.Ok(sampleBundleWithImages(it, "lesson-1").copy(version = "v2")) }
+
+        val report = manager.sync()
+
+        assertEquals("v2", bundles.get("course-1")?.version)
+        assertEquals(1, report.lessonsDownloaded)
+        assertEquals(2, report.imagesDownloaded)
+        assertEquals(listOf("cover.jpg", "lesson-1.jpg"), File(dir, "lessons/course-1").listFiles()!!.map { it.name }.sorted())
+    }
+
+    @Test
+    fun `an up-to-date bundle is not refetched`() = runTest {
+        bundles.save(sampleBundle("course-1", "lesson-1").copy(version = "v2"))
+        meWith(MeCourse("course-1", bundleVersion = "v2"))
+        var fetches = 0
+        api.bundleResult = { fetches++; ApiResult.Ok(sampleBundle(it)) }
+
+        manager.sync(); manager.sync()
+
+        assertEquals(0, fetches)
+    }
+
+    @Test
+    fun `a server that never converges is refetched once per version, not every pass`() = runTest {
+        bundles.save(sampleBundle("course-1", "lesson-1").copy(version = "v1"))
+        meWith(MeCourse("course-1", bundleVersion = "v2"))
+        var fetches = 0
+        // The server keeps handing back v1 although /me says v2.
+        api.bundleResult = { fetches++; ApiResult.Ok(sampleBundle(it).copy(version = "v1")) }
+
+        manager.sync(); manager.sync(); manager.sync()
+
+        assertEquals(1, fetches)
+
+        // A newer version later is fetched again.
+        meWith(MeCourse("course-1", bundleVersion = "v3"))
+        manager.sync()
+        assertEquals(2, fetches)
+    }
+
+    @Test
+    fun `a failed refetch keeps the old bundle and tries again next pass`() = runTest {
+        bundles.save(sampleBundle("course-1", "lesson-1").copy(version = "v1"))
+        meWith(MeCourse("course-1", bundleVersion = "v2"))
+        var fetches = 0
+        api.bundleResult = { fetches++; ApiResult.Retryable("HTTP 503") }
+
+        manager.sync(); manager.sync()
+
+        assertEquals("v1", bundles.get("course-1")?.version)
+        assertEquals(2, fetches)
+    }
+
+    @Test
+    fun `no bundleVersion from the server means no refetch of a stored bundle`() = runTest {
+        bundles.save(sampleBundle("course-1", "lesson-1").copy(version = "v1"))
+        meWith(MeCourse("course-1", bundleVersion = null))
+        var fetches = 0
+        api.bundleResult = { fetches++; ApiResult.Ok(sampleBundle(it)) }
+
+        manager.sync()
+
+        assertEquals(0, fetches)
+    }
+
+    @Test
+    fun `an old stored bundle with no version is refetched once the server reports one`() = runTest {
+        bundles.save(sampleBundle("course-1", "lesson-1").copy(version = null))
+        meWith(MeCourse("course-1", bundleVersion = "v9"))
+        api.bundleResult = { ApiResult.Ok(sampleBundle(it).copy(version = "v9")) }
+
+        manager.sync()
+
+        assertEquals("v9", bundles.get("course-1")?.version)
+    }
+
+    @Test
+    fun `when the server swaps an image id the stale local file is dropped and the new one fetched`() = runTest {
+        val old = sampleBundleWithImages("course-1", "lesson-1").copy(version = "v1")
+        bundles.save(old)
+        manager.sync() // downloads cover + module image
+        api.imageCalls.clear()
+        val newCover = "https://demo.example/api/sync/media/cover-NEW"
+        meWith(MeCourse("course-1", bundleVersion = "v2"))
+        api.bundleResult = { ApiResult.Ok(old.copy(version = "v2", course = old.course.copy(coverImageUrl = newCover))) }
+
+        manager.sync()
+
+        assertEquals("only the changed slot is fetched", listOf(newCover), api.imageCalls)
+        assertTrue(bundles.coverFile("course-1").exists())
+    }
+
+    // ---- placeholder only while a download is pending ----
+
+    @Test
+    fun `an image is pending only while its download is attempted, then never after`() = runTest {
+        bundles.save(sampleBundleWithImages())
+        val cover = bundles.coverFile("course-1").path
+        val module = bundles.lessonImageFile("course-1", "lesson-1").path
+        val seen = mutableListOf<Set<String>>()
+        api.imageResult = { seen += bundles.imagesPending.value; ApiResult.Ok(JPEG_BYTES) }
+
+        manager.sync()
+
+        assertEquals("both pending before the first download", setOf(cover, module), seen[0])
+        assertEquals("cover done, module still pending", setOf(module), seen[1])
+        assertTrue("nothing pending afterwards", bundles.imagesPending.value.isEmpty())
+    }
+
+    @Test
+    fun `a failed download collapses its placeholder`() = runTest {
+        bundles.save(sampleBundleWithImages())
+        api.imageResult = { ApiResult.Retryable("offline") }
+
+        manager.sync()
+
+        assertTrue(bundles.imagesPending.value.isEmpty())
+        val cover = bundles.coverFile("course-1")
+        assertEquals(ImageSlot.NOTHING, imageSlot(decoded = cover.exists(), downloadPending = cover.path in bundles.imagesPending.value))
+    }
+
+    @Test
+    fun `images that are not attempted this pass are not left pending`() = runTest {
+        val many = sampleBundle().let { b ->
+            b.copy(lessons = (1..6).map { i -> b.lessons.single().copy(id = "l$i", order = i, imageUrl = "https://demo.example/m/$i") })
+        }
+        bundles.save(many)
+        api.imageResult = { ApiResult.Retryable("timeout") } // gives up after three in a row
+
+        manager.sync()
+
+        assertEquals(3, api.imageCalls.size)
+        assertTrue("the other three must not keep a placeholder", bundles.imagesPending.value.isEmpty())
+    }
+
+    @Test
+    fun `no placeholder for an image the bundle does not name or the server already said is gone`() = runTest {
+        bundles.save(sampleBundle()) // no image urls
+        val seen = mutableListOf<Set<String>>()
+        manager.sync()
+        assertTrue(bundles.imagesPending.value.isEmpty())
+
+        bundles.save(sampleBundleWithImages())
+        api.imageResult = { seen += bundles.imagesPending.value; ApiResult.Rejected(404, "gone") }
+        manager.sync()
+        seen.clear()
+        manager.sync() // 404s are remembered: nothing to attempt, nothing pending
+        assertTrue(seen.isEmpty())
+        assertTrue(bundles.imagesPending.value.isEmpty())
+    }
+
+    @Test
+    fun `a pass that crashes mid-download still clears pending`() = runTest {
+        bundles.save(sampleBundleWithImages())
+        api.imageResult = { throw IllegalStateException("boom") }
+
+        runCatching { manager.sync() }
+
+        assertTrue(bundles.imagesPending.value.isEmpty())
+    }
 }

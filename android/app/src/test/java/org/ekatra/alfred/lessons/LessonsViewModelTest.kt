@@ -370,7 +370,7 @@ class LessonsViewModelTest {
             assertTrue(ui.online)
             assertEquals(listOf("fractions"), ui.pendingTopics)
             val msg = pendingRequestMessage(ui)!!
-            assertEquals("Creating your lesson with Muse Spark… this can take a minute", msg.text)
+            assertEquals("Creating your lesson with Meta Muse… this can take a minute", msg.text)
             assertTrue("shows a progress indicator", msg.showProgress)
             assertFalse(msg.text.contains("back online"))
             assertTrue("a retryable failure is not shown as a failure", ui.failedRequests.isEmpty())
@@ -705,15 +705,27 @@ class LessonsViewModelTest {
     }
 
     @Test
-    fun `a downloaded image bumps the revision the screens key on`() = runTest {
+    fun `each image's stamp reaches the ui state, and only the written one changes`() = runTest {
         newVm()
-        val before = vm.uiState.value.imageRevision
+        val cover = bundles.coverFile(course); val module = bundles.lessonImageFile(course, lesson)
+        bundles.writeImage(module, JPEG_BYTES)
+        val moduleStamp = vm.uiState.value.imageStamps[module.path]
 
-        bundles.writeImage(bundles.coverFile(course), JPEG_BYTES)
+        bundles.writeImage(cover, JPEG_BYTES)
 
-        assertEquals(before + 1, vm.uiState.value.imageRevision)
-        assertEquals(bundles.coverFile(course), vm.coverFile(course))
-        assertEquals(bundles.lessonImageFile(course, lesson), vm.lessonImageFile(course, lesson))
+        assertEquals(1L, vm.uiState.value.imageStamps[cover.path])
+        assertEquals("the other image is not re-decoded", moduleStamp, vm.uiState.value.imageStamps[module.path])
+        assertEquals(cover, vm.coverFile(course))
+        assertEquals(module, vm.lessonImageFile(course, lesson))
+    }
+
+    @Test
+    fun `pending image paths reach the ui state`() = runTest {
+        newVm()
+        bundles.setImagesPending(setOf("/x.jpg"))
+        assertEquals(setOf("/x.jpg"), vm.uiState.value.pendingImages)
+        bundles.imageDownloadFinished("/x.jpg")
+        assertTrue(vm.uiState.value.pendingImages.isEmpty())
     }
 
     @Test

@@ -108,15 +108,54 @@ class LessonStoresTest {
     }
 
     @Test
-    fun `writing an image goes through a temp file and bumps the revision`() {
+    fun `writing an image goes through a temp file`() {
         val store = LessonStore(File(dir, "lessons"))
-        val before = store.imageRevision.value
 
         store.writeImage(store.coverFile("c"), JPEG_BYTES)
 
         assertEquals(JPEG_BYTES.toList(), store.coverFile("c").readBytes().toList())
         assertTrue(File(dir, "lessons/c").listFiles()!!.none { it.name.endsWith(".tmp") })
-        assertEquals(before + 1, store.imageRevision.value)
+    }
+
+    @Test
+    fun `writing one image changes only that image's stamp`() {
+        val store = LessonStore(File(dir, "lessons"))
+        val cover = store.coverFile("c"); val a = store.lessonImageFile("c", "a"); val b = store.lessonImageFile("c", "b")
+        store.writeImage(cover, JPEG_BYTES); store.writeImage(a, JPEG_BYTES)
+        val before = store.imageStamps.value
+
+        store.writeImage(b, JPEG_BYTES)
+        assertEquals(before[cover.path], store.imageStamps.value[cover.path])
+        assertEquals(before[a.path], store.imageStamps.value[a.path])
+        assertTrue(store.imageStamps.value[b.path]!! > 0)
+
+        val coverStamp = store.imageStamps.value[cover.path]!!
+        store.writeImage(cover, JPEG_BYTES + 1)
+        assertEquals(coverStamp + 1, store.imageStamps.value[cover.path])
+        assertEquals("others untouched", before[a.path], store.imageStamps.value[a.path])
+    }
+
+    @Test
+    fun `deleting an image bumps its stamp so the screen drops it`() {
+        val store = LessonStore(File(dir, "lessons"))
+        val cover = store.coverFile("c")
+        store.writeImage(cover, JPEG_BYTES)
+        val stamp = store.imageStamps.value[cover.path]!!
+
+        store.deleteImage(cover)
+
+        assertFalse(cover.exists())
+        assertEquals(stamp + 1, store.imageStamps.value[cover.path])
+    }
+
+    @Test
+    fun `pending images are tracked per path and cleared on finish`() {
+        val store = LessonStore(File(dir, "lessons"))
+        store.setImagesPending(setOf("/a", "/b"))
+        store.imageDownloadFinished("/a")
+        assertEquals(setOf("/b"), store.imagesPending.value)
+        store.setImagesPending(emptySet())
+        assertTrue(store.imagesPending.value.isEmpty())
     }
 
     @Test
@@ -163,17 +202,73 @@ class LessonStoresTest {
         assertTrue(f.canonicalPath.startsWith(File(dir, "lessons").canonicalPath))
     }
 
+    // ---- decode plan ----
+
     @Test
-    fun `sample size halves until the image would drop below the view`() {
-        assertEquals(1, computeSampleSize(1024, 1024, 1024, 1024))
-        assertEquals(2, computeSampleSize(1024, 1024, 512, 512))
-        assertEquals("256 px would be too small for a 300 px view", 2, computeSampleSize(1024, 1024, 300, 300))
-        assertEquals(4, computeSampleSize(1024, 1024, 250, 250))
-        assertEquals(1, computeSampleSize(1024, 1024, 700, 700))
-        assertEquals(8, computeSampleSize(1024, 1024, 128, 128))
-        assertEquals("never upscale", 1, computeSampleSize(100, 100, 400, 400))
-        assertEquals("a tall view is limited by its height, not its width", 2, computeSampleSize(2048, 2048, 300, 1000))
-        assertEquals(1, computeSampleSize(0, 0, 100, 100))
-        assertEquals(1, computeSampleSize(1024, 1024, 0, 0))
+    fun `a full size image is decoded no wider than 640 px on its shorter side`() {
+        val plan = computeDecodePlan(1024, 1024, viewWidthPx = 1080)
+        assertEquals(640, plan.outWidth); assertEquals(640, plan.outHeight)
+        assertTrue("under 2 MB, was ${plan.bytes}", plan.bytes < 2_000_000)
+    }
+
+    @Test
+    fun `the wide cover banner no longer decodes a full 1024 square`() {
+        // The banner is as wide as the screen but only ~110 dp tall; size by width, not by height.
+        val banner = computeDecodePlan(1024, 1024, viewWidthPx = 1080)
+        assertTrue(banner.outWidth <= MAX_DECODE_SHORT_SIDE)
+        assertTrue(banner.bytes < 1_000_000)
+        assertTrue("was 4 MB as ARGB", banner.bytes < 4L * 1024 * 1024 / 4)
+    }
+
+    @Test
+    fun `the reader's two images together stay well under the old 8 MB`() {
+        val cover = computeDecodePlan(1024, 1024, 1080).bytes
+        val module = computeDecodePlan(1024, 1024, 900).bytes
+        assertTrue("cover+module was ${cover + module}", cover + module < 2_000_000)
+    }
+
+    @Test
+    fun `a smaller view gets a power-of-two sample and an exact output size`() {
+        val plan = computeDecodePlan(1024, 1024, viewWidthPx = 300)
+        assertEquals(2, plan.sampleSize) // 512 >= 300; 256 would be too small
+        assertEquals(300, plan.outWidth); assertEquals(300, plan.outHeight)
+
+        val thumb = computeDecodePlan(1024, 1024, viewWidthPx = 100)
+        assertEquals(8, thumb.sampleSize)
+        assertEquals(100, thumb.outWidth)
+    }
+
+    @Test
+    fun `never upscales, and keeps the aspect ratio of a non-square image`() {
+        assertEquals(DecodePlan(1, 400, 300), computeDecodePlan(400, 300, viewWidthPx = 1080))
+        val wide = computeDecodePlan(2048, 1024, viewWidthPx = 1080)
+        assertEquals(640, wide.outHeight)            // shorter side is the one that is sized
+        assertEquals(1280, wide.outWidth)
+    }
+
+    @Test
+    fun `any view width keeps one 1024 image under 2 MB`() {
+        for (w in 1..2400 step 7) {
+            val plan = computeDecodePlan(1024, 1024, w)
+            assertTrue("view $w -> ${plan.bytes} bytes", plan.bytes < 2_000_000)
+            assertTrue("view $w sample ${plan.sampleSize}", plan.sampleSize in listOf(1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024))
+        }
+    }
+
+    @Test
+    fun `bad dimensions fall back to a plain decode`() {
+        assertEquals(1, computeDecodePlan(0, 0, 100).sampleSize)
+        assertEquals(1, computeDecodePlan(1024, 1024, 0).sampleSize)
+        assertTrue(computeDecodePlan(1024, 1024, 0).outWidth >= 1)
+    }
+
+    // ---- what a slot draws ----
+
+    @Test
+    fun `a slot shows the image, else a placeholder only while pending, else nothing`() {
+        assertEquals(ImageSlot.SHOW_IMAGE, imageSlot(decoded = true, downloadPending = false))
+        assertEquals(ImageSlot.SHOW_IMAGE, imageSlot(decoded = true, downloadPending = true))
+        assertEquals(ImageSlot.PLACEHOLDER, imageSlot(decoded = false, downloadPending = true))
+        assertEquals("a failed or absent image collapses", ImageSlot.NOTHING, imageSlot(decoded = false, downloadPending = false))
     }
 }

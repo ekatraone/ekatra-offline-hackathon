@@ -12,6 +12,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.ekatra.alfred.data.local.SyncQueueDao
 import org.ekatra.alfred.data.model.SyncQueueItem
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -76,6 +77,8 @@ class LearnerSyncManager @Inject constructor(
     private val generationLock = Mutex()
     /** Image URLs the server said do not exist (404, not a JPEG, ...). Not asked again until the app restarts. */
     private val missingImageUrls = mutableSetOf<String>()
+    /** courseId -> the bundleVersion we already refetched for, so a server that never converges is not hammered. */
+    private val refetchedVersion = mutableMapOf<String, String>()
 
     /** Bundle and progress files are written during a pass, so a pass never runs on Main. Tests swap it. */
     internal var ioDispatcher: CoroutineDispatcher = Dispatchers.IO
@@ -273,13 +276,21 @@ class LearnerSyncManager @Inject constructor(
     }
 
     private suspend fun fetchMissingImages(): Int {
+        // Everything this pass will try, published up front so the UI shows a placeholder for exactly
+        // these images and for nothing that has already failed or will not be tried.
+        val todo = mutableListOf<Pair<File, String>>()
+        for (bundle in bundles.bundles.value) {
+            for ((file, url) in bundles.imageTargets(bundle)) {
+                if (!url.isNullOrBlank() && !file.exists() && url !in missingImageUrls) todo += file to url
+            }
+        }
+        bundles.setImagesPending(todo.map { it.first.path }.toSet())
         var saved = 0
         var attempts = 0
         var failuresInARow = 0
-        for (bundle in bundles.bundles.value) {
-            for ((file, url) in bundles.imageTargets(bundle)) {
-                if (url.isNullOrBlank() || file.exists() || url in missingImageUrls) continue
-                if (attempts >= MAX_IMAGES_PER_PASS || failuresInARow >= MAX_CONSECUTIVE_IMAGE_FAILURES) return saved
+        try {
+            for ((file, url) in todo) {
+                if (attempts >= MAX_IMAGES_PER_PASS || failuresInARow >= MAX_CONSECUTIVE_IMAGE_FAILURES) break
                 attempts++
                 when (val r = api.downloadImage(url)) {
                     is ApiResult.Ok -> {
@@ -292,7 +303,10 @@ class LearnerSyncManager @Inject constructor(
                     // Network trouble or a 5xx: leave it for the next pass.
                     else -> failuresInARow++
                 }
+                bundles.imageDownloadFinished(file.path) // done either way: a failure collapses its placeholder
             }
+        } finally {
+            bundles.setImagesPending(emptySet()) // whatever was not attempted is not "pending" any more
         }
         return saved
     }
@@ -310,23 +324,48 @@ class LearnerSyncManager @Inject constructor(
         }
     }
 
+    /**
+     * Download bundles we do not have, and refetch ones whose server `bundleVersion` moved on. The
+     * version hash covers image ids, so it changes when images that missed the server's time budget
+     * attach later; refetching is how they reach the phone. Once per course per version.
+     */
     private suspend fun fetchMissingBundles(me: MeResponse): Int {
         var n = 0
         val unavailable = progress.data.unavailableCourseIds
         // No generator filter: WhatsApp-made courses can come back without one. /me already leaves
         // authored courses out, and the bundle endpoint's 422 covers any that slip through.
         val wanted = me.courses
-            .filter { it.courseId !in unavailable && !bundles.has(it.courseId) }
+            .filter { it.courseId !in unavailable && needsBundle(it) }
             .take(MAX_BUNDLE_FETCHES)
         for (course in wanted) {
             when (val r = api.fetchBundle(course.courseId)) {
-                is ApiResult.Ok -> { bundles.save(r.value); n++ }
+                is ApiResult.Ok -> {
+                    course.bundleVersion?.let { refetchedVersion[course.courseId] = it }
+                    dropReplacedImages(bundles.get(course.courseId), r.value)
+                    bundles.save(r.value); n++
+                }
                 // Not enrolled (404) or authored (422): remember, so we do not ask again every pass.
                 is ApiResult.Rejected -> if (r.code == 404 || r.code == 422) progress.markCourseUnavailable(course.courseId)
                 else -> Log.d(TAG, "Bundle ${course.courseId} will be retried: $r")
             }
         }
         return n
+    }
+
+    private fun needsBundle(course: MeCourse): Boolean {
+        val stored = bundles.get(course.courseId) ?: return true
+        val serverVersion = course.bundleVersion ?: return false
+        return stored.version != serverVersion && refetchedVersion[course.courseId] != serverVersion
+    }
+
+    /** If the server now names a different image for a slot we already have a file for, the old file is stale. */
+    private fun dropReplacedImages(old: LessonBundle?, new: LessonBundle) {
+        if (old == null) return
+        val before = bundles.imageTargets(old).associate { it.first.path to it.second }
+        for ((file, url) in bundles.imageTargets(new)) {
+            val was = before[file.path]
+            if (url != null && was != null && was != url && file.exists()) bundles.deleteImage(file)
+        }
     }
 
     private fun parseRequest(item: SyncQueueItem): LessonRequestPayload? =
