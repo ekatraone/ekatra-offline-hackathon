@@ -202,13 +202,16 @@ private fun CourseCard(bundle: LessonBundle, ui: LessonsUiState, vm: LessonsView
     Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             val cover = vm.coverFile(bundle.course.id)
-            LessonImage(
-                file = cover,
-                pending = cover.path in ui.pendingImages,
-                stamp = ui.imageStamps[cover.path] ?: 0L,
-                contentDescription = "Cover illustration for ${bundle.course.title}",
-                shape = Modifier.height(140.dp).clip(RoundedCornerShape(12.dp))
-            )
+            val coverPending = cover.path in ui.pendingImages
+            val coverStamp = ui.imageStamps[cover.path] ?: 0L
+            // Not emitted at all when there is nothing to show: an empty child still adds a spacedBy gap.
+            if (rememberImageSlotVisible(cover, coverPending, coverStamp)) {
+                LessonImage(
+                    file = cover, pending = coverPending, stamp = coverStamp,
+                    contentDescription = "Cover illustration for ${bundle.course.title}",
+                    shape = Modifier.height(140.dp).clip(RoundedCornerShape(12.dp))
+                )
+            }
             Text(bundle.course.title, fontWeight = FontWeight.Bold, fontSize = 17.sp)
             bundle.course.description?.takeIf { it.isNotBlank() }?.let { Text(it, fontSize = 13.sp, color = Color(0xFF475569)) }
             bundle.course.generator?.let { g ->
@@ -259,23 +262,27 @@ private fun ReadScreen(lesson: BundleLesson, courseId: String, ui: LessonsUiStat
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp).navigationBarsPadding(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         if (course != null) {
             val cover = vm.coverFile(courseId)
-            LessonImage(
-                file = cover,
-                pending = cover.path in ui.pendingImages,
-                stamp = ui.imageStamps[cover.path] ?: 0L,
-                contentDescription = "Cover illustration for ${course.title}",
-                shape = Modifier.height(110.dp).clip(RoundedCornerShape(12.dp))
-            )
+            val coverPending = cover.path in ui.pendingImages
+            val coverStamp = ui.imageStamps[cover.path] ?: 0L
+            if (rememberImageSlotVisible(cover, coverPending, coverStamp)) {
+                LessonImage(
+                    file = cover, pending = coverPending, stamp = coverStamp,
+                    contentDescription = "Cover illustration for ${course.title}",
+                    shape = Modifier.height(110.dp).clip(RoundedCornerShape(12.dp))
+                )
+            }
         }
         Text(lesson.title, fontWeight = FontWeight.Bold, fontSize = 22.sp)
         val moduleImage = vm.lessonImageFile(courseId, lesson.id)
-        LessonImage(
-            file = moduleImage,
-            pending = moduleImage.path in ui.pendingImages,
-            stamp = ui.imageStamps[moduleImage.path] ?: 0L,
-            contentDescription = "Illustration for ${lesson.title}",
-            shape = Modifier.aspectRatio(1f).clip(RoundedCornerShape(12.dp))
-        )
+        val modulePending = moduleImage.path in ui.pendingImages
+        val moduleStamp = ui.imageStamps[moduleImage.path] ?: 0L
+        if (rememberImageSlotVisible(moduleImage, modulePending, moduleStamp)) {
+            LessonImage(
+                file = moduleImage, pending = modulePending, stamp = moduleStamp,
+                contentDescription = "Illustration for ${lesson.title}",
+                shape = Modifier.aspectRatio(1f).clip(RoundedCornerShape(12.dp))
+            )
+        }
         Text(lessonText(lesson.content.orEmpty()), fontSize = 17.sp, lineHeight = 26.sp)
         if (lesson.questions.isNotEmpty()) {
             Button(onClick = onStartQuiz, modifier = Modifier.fillMaxWidth()) {

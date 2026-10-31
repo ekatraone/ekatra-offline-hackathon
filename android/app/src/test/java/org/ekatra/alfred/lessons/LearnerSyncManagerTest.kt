@@ -777,7 +777,7 @@ class LearnerSyncManagerTest {
 
         assertTrue(bundles.imagesPending.value.isEmpty())
         val cover = bundles.coverFile("course-1")
-        assertEquals(ImageSlot.NOTHING, imageSlot(decoded = cover.exists(), downloadPending = cover.path in bundles.imagesPending.value))
+        assertEquals(ImageSlot.NOTHING, imageSlot(hasImage = false, decodeSettled = true, fileExists = cover.exists(), downloadPending = cover.path in bundles.imagesPending.value))
     }
 
     @Test
@@ -818,5 +818,53 @@ class LearnerSyncManagerTest {
         runCatching { manager.sync() }
 
         assertTrue(bundles.imagesPending.value.isEmpty())
+    }
+
+    // ---- image identity ----
+
+    @Test
+    fun `media ids are compared, not whole urls`() {
+        assertEquals("abc-123", LearnerSyncManager.mediaId("https://one.example/api/sync/media/abc-123"))
+        assertEquals("abc-123", LearnerSyncManager.mediaId("http://127.0.0.1:3001/api/sync/media/abc-123"))
+        assertEquals("abc-123", LearnerSyncManager.mediaId("https://x/api/sync/media/abc-123?v=2"))
+        assertEquals("abc-123", LearnerSyncManager.mediaId("https://x/api/sync/media/abc-123/"))
+        assertEquals("a url of another shape is compared whole", "https://x/other/1", LearnerSyncManager.mediaId("https://x/other/1"))
+    }
+
+    @Test
+    fun `a changed base url keeps the valid files and does not download them again`() = runTest {
+        val old = sampleBundleWithImages("course-1", "lesson-1").copy(version = "v1")
+        bundles.save(old)
+        manager.sync() // cover + module image downloaded from demo.example
+        api.imageCalls.clear()
+        // Same media ids, new host (say the demo moved from adb reverse to Railway).
+        fun moved(u: String?) = u?.replace("https://demo.example", "https://new-host.example")
+        val moved = old.copy(
+            version = "v2",
+            course = old.course.copy(coverImageUrl = moved(old.course.coverImageUrl)),
+            lessons = old.lessons.map { it.copy(imageUrl = moved(it.imageUrl)) }
+        )
+        meWith(MeCourse("course-1", bundleVersion = "v2"))
+        api.bundleResult = { ApiResult.Ok(moved) }
+
+        manager.sync()
+
+        assertTrue("the files are still there", bundles.coverFile("course-1").exists() && bundles.lessonImageFile("course-1", "lesson-1").exists())
+        assertTrue("nothing was fetched again", api.imageCalls.isEmpty())
+    }
+
+    @Test
+    fun `a different media id replaces the file even when the host also changed`() = runTest {
+        val old = sampleBundleWithImages("course-1", "lesson-1").copy(version = "v1")
+        bundles.save(old)
+        manager.sync()
+        api.imageCalls.clear()
+        val newCover = "https://new-host.example/api/sync/media/cover-NEW"
+        meWith(MeCourse("course-1", bundleVersion = "v2"))
+        api.bundleResult = { ApiResult.Ok(old.copy(version = "v2", course = old.course.copy(coverImageUrl = newCover))) }
+
+        manager.sync()
+
+        assertEquals(listOf(newCover), api.imageCalls)
     }
 }

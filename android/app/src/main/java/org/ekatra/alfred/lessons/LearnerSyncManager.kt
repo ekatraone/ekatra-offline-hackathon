@@ -66,6 +66,13 @@ class LearnerSyncManager @Inject constructor(
         /** Stop the image step after this many failures in a row (probably no real connection). */
         private const val MAX_CONSECUTIVE_IMAGE_FAILURES = 3
 
+        /**
+         * The id in `/api/sync/media/<uuid>`, so a changed base URL (a new host, http vs https) is not mistaken
+         * for a different image. A URL that is not that shape is compared as a whole.
+         */
+        internal fun mediaId(url: String): String =
+            url.substringAfter("/api/sync/media/", url).substringBefore('?').substringBefore('#').trimEnd('/')
+
         fun nowIso(millis: Long = System.currentTimeMillis()): String =
             SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
                 .apply { timeZone = TimeZone.getTimeZone("UTC") }
@@ -364,7 +371,7 @@ class LearnerSyncManager @Inject constructor(
         val before = bundles.imageTargets(old).associate { it.first.path to it.second }
         for ((file, url) in bundles.imageTargets(new)) {
             val was = before[file.path]
-            if (url != null && was != null && was != url && file.exists()) bundles.deleteImage(file)
+            if (url != null && was != null && mediaId(was) != mediaId(url) && file.exists()) bundles.deleteImage(file)
         }
     }
 

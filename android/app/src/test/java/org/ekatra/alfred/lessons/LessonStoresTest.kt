@@ -204,27 +204,41 @@ class LessonStoresTest {
 
     // ---- decode plan ----
 
+    private val twoMiB = 2L * 1024 * 1024
+
     @Test
-    fun `a full size image is decoded no wider than 640 px on its shorter side`() {
+    fun `a full size image on a wide view decodes at its native 1024 and fits in 2 MiB`() {
         val plan = computeDecodePlan(1024, 1024, viewWidthPx = 1080)
-        assertEquals(640, plan.outWidth); assertEquals(640, plan.outHeight)
-        assertTrue("under 2 MB, was ${plan.bytes}", plan.bytes < 2_000_000)
+        assertEquals(DecodePlan(1, 1024, 1024), plan)
+        assertTrue("was ${plan.bytes}", plan.bytes <= twoMiB)
     }
 
     @Test
-    fun `the wide cover banner no longer decodes a full 1024 square`() {
-        // The banner is as wide as the screen but only ~110 dp tall; size by width, not by height.
+    fun `a view about 1000 px wide gets 1000 px, not an upscaled 640`() {
+        val plan = computeDecodePlan(1024, 1024, viewWidthPx = 1000)
+        assertEquals(1, plan.sampleSize)
+        assertEquals(1000, plan.outWidth)
+        assertTrue(plan.bytes <= twoMiB)
+    }
+
+    @Test
+    fun `the cap is 1024 on the shorter side`() {
+        assertEquals(1024, MAX_DECODE_SHORT_SIDE)
+        assertEquals(1024, computeDecodePlan(2048, 2048, viewWidthPx = 4000).outWidth)
+    }
+
+    @Test
+    fun `the wide cover banner is sized like any other view of that width, by its shorter side`() {
         val banner = computeDecodePlan(1024, 1024, viewWidthPx = 1080)
-        assertTrue(banner.outWidth <= MAX_DECODE_SHORT_SIDE)
-        assertTrue(banner.bytes < 1_000_000)
-        assertTrue("was 4 MB as ARGB", banner.bytes < 4L * 1024 * 1024 / 4)
+        assertTrue(banner.bytes <= twoMiB)
+        assertTrue("was 4 MiB as ARGB_8888", banner.bytes <= 4L * 1024 * 1024 / 2)
     }
 
     @Test
-    fun `the reader's two images together stay well under the old 8 MB`() {
+    fun `the reader's two images together are about half the old 8 MB`() {
         val cover = computeDecodePlan(1024, 1024, 1080).bytes
-        val module = computeDecodePlan(1024, 1024, 900).bytes
-        assertTrue("cover+module was ${cover + module}", cover + module < 2_000_000)
+        val module = computeDecodePlan(1024, 1024, 1000).bytes
+        assertTrue("cover+module was ${cover + module}", cover + module <= 2 * twoMiB)
     }
 
     @Test
@@ -241,16 +255,16 @@ class LessonStoresTest {
     @Test
     fun `never upscales, and keeps the aspect ratio of a non-square image`() {
         assertEquals(DecodePlan(1, 400, 300), computeDecodePlan(400, 300, viewWidthPx = 1080))
-        val wide = computeDecodePlan(2048, 1024, viewWidthPx = 1080)
-        assertEquals(640, wide.outHeight)            // shorter side is the one that is sized
-        assertEquals(1280, wide.outWidth)
+        val wide = computeDecodePlan(4096, 2048, viewWidthPx = 1000)
+        assertEquals(1000, wide.outHeight)           // the shorter side is the one that is sized
+        assertEquals(2000, wide.outWidth)
     }
 
     @Test
-    fun `any view width keeps one 1024 image under 2 MB`() {
+    fun `any view width keeps one 1024 image within 2 MiB`() {
         for (w in 1..2400 step 7) {
             val plan = computeDecodePlan(1024, 1024, w)
-            assertTrue("view $w -> ${plan.bytes} bytes", plan.bytes < 2_000_000)
+            assertTrue("view $w -> ${plan.bytes} bytes", plan.bytes <= twoMiB)
             assertTrue("view $w sample ${plan.sampleSize}", plan.sampleSize in listOf(1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024))
         }
     }
@@ -265,10 +279,70 @@ class LessonStoresTest {
     // ---- what a slot draws ----
 
     @Test
-    fun `a slot shows the image, else a placeholder only while pending, else nothing`() {
-        assertEquals(ImageSlot.SHOW_IMAGE, imageSlot(decoded = true, downloadPending = false))
-        assertEquals(ImageSlot.SHOW_IMAGE, imageSlot(decoded = true, downloadPending = true))
-        assertEquals(ImageSlot.PLACEHOLDER, imageSlot(decoded = false, downloadPending = true))
-        assertEquals("a failed or absent image collapses", ImageSlot.NOTHING, imageSlot(decoded = false, downloadPending = false))
+    fun `the placeholder holds through decoding, so the slot does not collapse and then pop back`() {
+        // Download finished (not pending any more), file is on disk, bitmap not decoded yet.
+        assertEquals(ImageSlot.PLACEHOLDER, imageSlot(hasImage = false, decodeSettled = false, fileExists = true, downloadPending = false))
+        // Then the bitmap arrives.
+        assertEquals(ImageSlot.SHOW_IMAGE, imageSlot(hasImage = true, decodeSettled = true, fileExists = true, downloadPending = false))
+    }
+
+    @Test
+    fun `a replaced image keeps showing the previous bitmap while the new file decodes`() {
+        assertEquals(ImageSlot.SHOW_IMAGE, imageSlot(hasImage = true, decodeSettled = false, fileExists = true, downloadPending = false))
+        assertEquals(ImageSlot.SHOW_IMAGE, imageSlot(hasImage = true, decodeSettled = false, fileExists = true, downloadPending = true))
+    }
+
+    @Test
+    fun `a bitmap for a file that has since been deleted is not shown`() {
+        assertEquals(ImageSlot.NOTHING, imageSlot(hasImage = true, decodeSettled = true, fileExists = false, downloadPending = false))
+        assertEquals(ImageSlot.PLACEHOLDER, imageSlot(hasImage = true, decodeSettled = true, fileExists = false, downloadPending = true))
+    }
+
+    @Test
+    fun `while a download is pending the slot is a placeholder, after a failed one it is nothing`() {
+        assertEquals(ImageSlot.PLACEHOLDER, imageSlot(hasImage = false, decodeSettled = false, fileExists = false, downloadPending = true))
+        assertEquals(ImageSlot.NOTHING, imageSlot(hasImage = false, decodeSettled = true, fileExists = false, downloadPending = false))
+        assertEquals(ImageSlot.NOTHING, imageSlot(hasImage = false, decodeSettled = false, fileExists = false, downloadPending = false))
+    }
+
+    @Test
+    fun `a file that is on disk but cannot be decoded draws nothing once the decode has settled`() {
+        assertEquals(ImageSlot.NOTHING, imageSlot(hasImage = false, decodeSettled = true, fileExists = true, downloadPending = false))
+    }
+
+    @Test
+    fun `an empty slot is not emitted, so it adds no spacing gap`() {
+        assertFalse(slotVisible(fileExists = false, knownBroken = false, downloadPending = false))
+        assertFalse(slotVisible(fileExists = true, knownBroken = true, downloadPending = false))
+        assertTrue(slotVisible(fileExists = true, knownBroken = false, downloadPending = false))
+        assertTrue(slotVisible(fileExists = false, knownBroken = false, downloadPending = true))
+        assertTrue("a pending download wins over a stale broken mark", slotVisible(fileExists = true, knownBroken = true, downloadPending = true))
+    }
+
+    // ---- bitmap LRU ----
+
+    @Test
+    fun `the cache evicts the least recently used and keeps the newest`() {
+        val lru = SizedLru<String>(maxBytes = 100)
+        lru.put("a", "A", 40); lru.put("b", "B", 40)
+        assertEquals("A", lru["a"]) // touch a: now b is the oldest
+        lru.put("c", "C", 40)
+
+        assertNull(lru["b"])
+        assertEquals("A", lru["a"]); assertEquals("C", lru["c"])
+        assertEquals(80, lru.totalBytes)
+    }
+
+    @Test
+    fun `replacing an entry fixes the byte count and one oversized entry is still kept`() {
+        val lru = SizedLru<String>(maxBytes = 100)
+        lru.put("a", "A", 60); lru.put("a", "A2", 30)
+        assertEquals(30, lru.totalBytes); assertEquals("A2", lru["a"])
+
+        lru.put("big", "BIG", 500)
+        assertEquals("BIG", lru["big"])
+        assertEquals(1, lru.size)
+        lru.remove("big"); assertEquals(0, lru.totalBytes)
+        lru.put("x", "X", 10); lru.clear(); assertEquals(0, lru.size)
     }
 }
