@@ -10,7 +10,9 @@ export interface FakeChallenge {
   id: string; phone: string; code_hash: string; expires_at: string; attempts: number;
   consumed_at: string | null; created_at: number; at: number;
 }
-export interface FakeEvent { phone: string; kind: 'start' | 'wrong' | 'lock'; at: number }
+export interface FakeEvent { id?: number; phone: string; kind: 'start' | 'wrong' | 'lock'; at: number }
+export interface FakeCourse { id: string; title: string; source: string; fsm_definition_id: string | null; settings: Record<string, any> }
+export interface FakeEnrollment { learner_id: string; course_id: string }
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -22,10 +24,18 @@ export function makeAuthDb(seed: Partial<FakeLearner>[] = [], clock: () => numbe
   }));
   const challenges: FakeChallenge[] = [];
   const events: FakeEvent[] = [];
+  const courses: FakeCourse[] = [];
+  const enrollments: FakeEnrollment[] = [];
   const recent = (e: FakeEvent) => clock() - e.at < DAY;
+  // The latest lock lasts 1 h, or 24 h once there are two locks in the last 24 h.
+  const lockedNow = (phone: string) => {
+    const locks = events.filter((e) => e.phone === phone && e.kind === 'lock' && recent(e));
+    const lasts = locks.length >= 2 ? DAY : 3_600_000;
+    return locks.some((e) => clock() - e.at < lasts);
+  };
 
   return {
-    learners, challenges, events,
+    learners, challenges, events, courses, enrollments,
     async raw(sql: string, p: any[] = []): Promise<{ rows: any[]; rowCount?: number }> {
       const has = (s: string) => sql.includes(s);
       if (has('FROM organizations')) return { rows: [{ id: ORG }] };
@@ -91,13 +101,17 @@ export function makeAuthDb(seed: Partial<FakeLearner>[] = [], clock: () => numbe
       // sign-in abuse ledger
       if (has('AS phone_starts')) {
         return { rows: [{
-          locked: events.some((e) => e.phone === p[0] && e.kind === 'lock' && recent(e)),
+          locked: lockedNow(p[0]),
           phone_starts: events.filter((e) => e.phone === p[0] && e.kind === 'start' && recent(e)).length,
           global_starts: events.filter((e) => e.kind === 'start' && recent(e)).length,
         }] };
       }
-      if (has("kind = 'lock'") && has('LIMIT 1')) {
-        return { rows: events.some((e) => e.phone === p[0] && e.kind === 'lock' && recent(e)) ? [{}] : [] };
+      if (has('AS locked_now')) return { rows: [{ locked_now: lockedNow(p[0]) }] };
+      if (has('DELETE FROM otp_events WHERE id = (')) { // refund the most recent 'start'
+        const starts = events.filter((e) => e.phone === p[0] && e.kind === 'start');
+        const last = starts[starts.length - 1];
+        if (last) events.splice(events.indexOf(last), 1);
+        return { rows: [] };
       }
       if (has('INSERT INTO otp_events')) {
         const kind = (/'(start|wrong|lock)'/.exec(sql)![1]) as FakeEvent['kind'];
@@ -105,7 +119,10 @@ export function makeAuthDb(seed: Partial<FakeLearner>[] = [], clock: () => numbe
         return { rows: [] };
       }
       if (has("kind = 'wrong'") && has('AS n')) {
-        return { rows: [{ n: events.filter((e) => e.phone === p[0] && e.kind === 'wrong' && recent(e)).length }] };
+        // wrong guesses since the later of 24 h ago and the last lock
+        const lastLock = Math.max(-Infinity, ...events.filter((e) => e.phone === p[0] && e.kind === 'lock').map((e) => e.at));
+        const since = Math.max(clock() - DAY, lastLock);
+        return { rows: [{ n: events.filter((e) => e.phone === p[0] && e.kind === 'wrong' && e.at > since).length }] };
       }
       if (has('DELETE FROM otp_challenges WHERE created_at')) {
         for (let i = challenges.length - 1; i >= 0; i--) if (clock() - challenges[i].at > DAY) challenges.splice(i, 1);
@@ -121,6 +138,19 @@ export function makeAuthDb(seed: Partial<FakeLearner>[] = [], clock: () => numbe
         const idx = learners.findIndex((l) => l.id === p[0] && l.organization_id === p[1]);
         if (idx < 0) return { rows: [{ deleted: 0 }] };
         const { phone } = learners[idx];
+        const id = learners[idx].id;
+        // AI-generated, non-authored courses this learner was enrolled in and nobody else is
+        const orphaned = courses.filter((c) =>
+          c.source !== 'authored' && !c.fsm_definition_id &&
+          (c.settings.aiGenerated === true || c.settings.generator != null) &&
+          enrollments.some((e) => e.course_id === c.id && e.learner_id === id) &&
+          !enrollments.some((e) => e.course_id === c.id && e.learner_id !== id)).map((c) => c.id);
+        for (const cid of orphaned) {
+          courses.splice(courses.findIndex((c) => c.id === cid), 1);
+        }
+        for (let i = enrollments.length - 1; i >= 0; i--) {
+          if (enrollments[i].learner_id === id || orphaned.includes(enrollments[i].course_id)) enrollments.splice(i, 1);
+        }
         const numbers = new Set([phone, ...(phone.startsWith('fb:') ? [] : ['+' + phone.replace(/\D/g, '')])]);
         for (let i = challenges.length - 1; i >= 0; i--) if (numbers.has(challenges[i].phone)) challenges.splice(i, 1);
         for (let i = events.length - 1; i >= 0; i--) if (numbers.has(events[i].phone)) events.splice(i, 1);

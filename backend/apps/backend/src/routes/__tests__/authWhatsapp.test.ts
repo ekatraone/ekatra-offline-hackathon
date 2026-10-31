@@ -176,6 +176,25 @@ test('codes are never written to the log in production', async () => {
 
 // ── durable abuse caps ─────────────────────────────────────────────────────
 
+test('start: a provider failure (502) refunds the code count, so an outage does not burn the quota', async () => {
+  const db = makeAuthDb();
+  let fail = true;
+  const flaky: OtpProvider = { name: 'f', start: async () => { if (fail) throw new Error('twilio 503'); }, check: async () => 'wrong' };
+  const app = express();
+  app.use(express.json());
+  app.use('/w', createWhatsappAuthRouter({ otp: () => flaky, firebase: () => makeFirebase(), limits: new OtpLimits(db, { OTP_DAILY_CAP: '1' }) }));
+  const server = await new Promise<Server>((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+  servers.push(server);
+  const post = (phone: string) => fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/w/start`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone }) });
+
+  assert.equal((await post(PHONE)).status, 502);
+  assert.equal(db.events.filter((e) => e.kind === 'start').length, 0, 'the failed code was refunded');
+  fail = false;
+  // with a global cap of 1, a burned quota would make this a 503
+  assert.equal((await post(PHONE)).status, 200);
+  assert.equal(db.events.filter((e) => e.kind === 'start').length, 1, 'a delivered code still counts');
+});
+
 test('start: a global daily cap (OTP_DAILY_CAP) answers 503 "temporarily unavailable" and sends nothing more', async () => {
   const { post, sent } = await startApp({ env: { OTP_DAILY_CAP: '2' } });
   assert.equal((await post('/start', { phone: '+919000000001' })).status, 200);

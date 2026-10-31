@@ -82,6 +82,8 @@ export function createWhatsappAuthRouter({ otp, firebase, limits }: WhatsappAuth
         res.json({ success: true, data: { resendAfterSeconds: RESEND_AFTER_SECONDS, expiresInSeconds: CODE_TTL_SECONDS } });
       } catch (err: any) {
         logger.error(`WhatsApp sign-in code could not be sent: ${err?.message}`);
+        // The user never got a code, so a provider outage must not eat their daily quota.
+        await limits.refundStart(req.signInPhone!);
         res.status(502).json({ success: false, error: 'Could not send the code. Please try again.' });
       }
     },
