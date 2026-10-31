@@ -1,0 +1,171 @@
+diff --git a/apps/backend/src/flows/conversationFSM.ts b/apps/backend/src/flows/conversationFSM.ts
+index 9b517b7b..1e5f7c4b 100644
+--- a/apps/backend/src/flows/conversationFSM.ts
++++ b/apps/backend/src/flows/conversationFSM.ts
+@@ -479,11 +479,12 @@ export class ConversationFSM {
+       practical: 'Practical & hands-on',
+     };
+     const styleLabel = styleLabelMap[style || 'casual'] || style || 'Casual';
++    const micro = process.env.COURSE_SIZE === 'micro';
+ 
+     await messaging.sendInteractiveButtons(learner.phone, {
+       body: isHindi
+-        ? `✅ *आपका लर्निंग प्लान:*\n\n📌 *विषय:* ${topic}\n🎯 *लक्ष्य:* ${goal}\n✍️ *शैली:* ${styleLabel}\n📚 *5 छोटे पाठ*, हर एक ~3 मिनट\n\nक्या Alfred इसे आपके लिए बनाए?`
+-        : `✅ *Here's your learning plan:*\n\n📌 *Topic:* ${topic}\n🎯 *Goal:* ${goal}\n✍️ *Style:* ${styleLabel}\n📚 *5 bite-sized lessons*, each ~3 min\n✨ *Includes:* Explanations, quizzes & flashcards\n\nShall Alfred generate this course for you?`,
++        ? `✅ *आपका लर्निंग प्लान:*\n\n📌 *विषय:* ${topic}\n🎯 *लक्ष्य:* ${goal}\n✍️ *शैली:* ${styleLabel}\n📚 *${micro ? '3 छोटे पाठ' : '5 छोटे पाठ'}*, हर एक ~${micro ? '1' : '3'} मिनट\n\nक्या Alfred इसे आपके लिए बनाए?`
++        : `✅ *Here's your learning plan:*\n\n📌 *Topic:* ${topic}\n🎯 *Goal:* ${goal}\n✍️ *Style:* ${styleLabel}\n📚 *${micro ? '3 bite-sized lessons' : '5 bite-sized lessons'}*, each ~${micro ? '1' : '3'} min\n✨ *Includes:* Explanations, quizzes & flashcards\n\nShall Alfred generate this course for you?`,
+       buttons: [
+         { id: 'confirm_yes', title: isHindi ? 'हाँ, शुरू करें!' : 'Yes, start!' },
+         { id: 'confirm_change', title: isHindi ? 'विषय बदलें' : 'Change topic' },
+@@ -513,7 +514,7 @@ export class ConversationFSM {
+     const firstName = (learner.name || '').split(' ')[0];
+     const nameStr = firstName ? `, ${firstName}` : '';
+     await messaging.sendText(learner.phone, {
+-      text: `🔄 Alfred is generating your personalised *${ctx.data.topic}* course${nameStr}...\n\nThis takes about 30 seconds. I'll message you when it's ready! ✨`,
++      text: `🔄 Alfred is generating your personalised *${ctx.data.topic}* course${nameStr}...\n\nThis takes about ${process.env.COURSE_SIZE === 'micro' ? '1-2 minutes' : '30 seconds'}. I'll message you when it's ready! ✨`,
+     });
+ 
+     // Generate in background (don't await in the webhook response).
+diff --git a/apps/backend/src/services/courseGenerator.ts b/apps/backend/src/services/courseGenerator.ts
+index ad8d17bf..1f903a14 100644
+--- a/apps/backend/src/services/courseGenerator.ts
++++ b/apps/backend/src/services/courseGenerator.ts
+@@ -20,6 +20,12 @@ export interface CourseGenerationParams {
+   numDays?: number;    // default 3, max 5
+   numModules?: number; // modules per day, default 3, max 5
+   organizationId: string;
++  /** 'micro' = 1 day × 3 short modules; defaults to COURSE_SIZE env or 'standard'. */
++  size?: 'micro' | 'standard';
++  /** Force a provider (e.g. 'meta' for Muse Spark) instead of the llmChat fallback chain. */
++  provider?: 'meta';
++  /** Skip the existing-course reuse check and always generate. */
++  force?: boolean;
+ }
+ 
+ interface GeneratedQuiz {
+@@ -47,6 +53,13 @@ interface GeneratedCourse {
+   days: GeneratedDay[];
+ }
+ 
++export type CourseSize = 'micro' | 'standard';
++
++export function resolveCourseSize(size?: CourseSize): CourseSize {
++  if (size) return size;
++  return process.env.COURSE_SIZE === 'micro' ? 'micro' : 'standard';
++}
++
+ // ── Dedup matching ─────────────────────────────────────────────────────────
+ 
+ const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+@@ -85,22 +98,28 @@ export class CourseGeneratorService {
+       goal,
+       language = 'en',
+       style = 'conversational',
+-      numDays = Math.min(Math.max(params.numDays ?? 3, 3), 5),
+-      numModules = Math.min(Math.max(params.numModules ?? 3, 3), 5),
+       organizationId,
++      provider,
++      force = false,
+     } = params;
++    const size = resolveCourseSize(params.size);
++    // The 3-minimum clamp applies only to standard courses.
++    const numDays = size === 'micro' ? 1 : Math.min(Math.max(params.numDays ?? 3, 3), 5);
++    const numModules = size === 'micro' ? 3 : Math.min(Math.max(params.numModules ?? 3, 3), 5);
+ 
+     // ── Deduplication: check for existing published course ─────────────────
+-    const existing = await this.findExistingCourse(topic, organizationId, language);
+-    if (existing) {
+-      logger.info(`♻️  Reusing existing course "${existing.title}" (${existing.id}) for topic "${topic}"`);
+-      return existing;
++    if (!force) {
++      const existing = await this.findExistingCourse(topic, organizationId, language);
++      if (existing) {
++        logger.info(`♻️  Reusing existing course "${existing.title}" (${existing.id}) for topic "${topic}"`);
++        return existing;
++      }
+     }
+ 
+-    logger.info(`🎓 Generating course: "${topic}" (${numDays} days × ${numModules} modules, lang=${language})`);
++    logger.info(`🎓 Generating ${size} course: "${topic}" (${numDays} days × ${numModules} modules, lang=${language})`);
+ 
+-    const courseData = await this.callLLM(topic, goal, language, style, numDays, numModules);
+-    const course = await this.saveToDB(courseData, organizationId, language);
++    const courseData = await this.callLLM(topic, goal, language, style, numDays, numModules, size, provider);
++    const course = await this.saveToDB(courseData, organizationId, language, size, provider);
+ 
+     logger.info(`✅ Course saved: ${course.id} — "${course.title}"`);
+     return course;
+@@ -133,7 +152,12 @@ export class CourseGeneratorService {
+     style: string,
+     numDays: number,
+     numModules: number,
++    size: CourseSize,
++    provider?: 'meta',
+   ): Promise<GeneratedCourse> {
++    const micro = size === 'micro';
++    const reviewCount = micro ? 2 : 3;
++    const wordRange = micro ? '80-120 words' : '150-200 words';
+     const goalLine = goal ? `\nLearner's goal: ${goal}` : '';
+     const langLine = language !== 'en' ? `\nRespond entirely in language code: ${language}` : '';
+ 
+@@ -144,7 +168,7 @@ Rules:
+ - Use simple, conversational language. Avoid jargon.
+ - Use \\n\\n to separate paragraphs within module content.
+ - Each module MUST have exactly ONE quiz question (4 options, one correct answer A/B/C/D).
+-- Each day MUST have exactly 3 comprehension questions that test understanding across all modules that day.
++- Each day MUST have exactly ${reviewCount} comprehension questions that test understanding across all modules that day.
+ - NO flashcards — do not include any flashcard fields.
+ - Respond ONLY with valid JSON. No markdown fences, no commentary.${langLine}`;
+ 
+@@ -162,7 +186,7 @@ Return this exact JSON structure:
+       "modules": [
+         {
+           "title": "Module title (max 60 characters)",
+-          "content": "Module body (150-200 words). Use \\n\\n for paragraphs. Use *bold* for key terms.",
++          "content": "Module body (${wordRange}). Use \\n\\n for paragraphs. Use *bold* for key terms.",
+           "quiz": {
+             "question": "Question testing understanding of this module?",
+             "options": ["Option A text", "Option B text", "Option C text", "Option D text"],
+@@ -183,7 +207,7 @@ Return this exact JSON structure:
+   ]
+ }
+ 
+-Ensure comprehensionQuestions has exactly 3 items per day.`;
++Ensure comprehensionQuestions has exactly ${reviewCount} items per day.`;
+ 
+     for (let attempt = 1; attempt <= 3; attempt++) {
+       try {
+@@ -193,6 +217,7 @@ Ensure comprehensionQuestions has exactly 3 items per day.`;
+             { role: 'user', content: userPrompt },
+           ],
+           temperature: 0.7,
++          ...(provider ? { provider } : {}),
+           // Reasoning models spend part of this on hidden reasoning before emitting
+           // the course JSON — 4000 truncates mid-output for 3+ day courses.
+           maxTokens: 8000,
+@@ -224,6 +249,8 @@ Ensure comprehensionQuestions has exactly 3 items per day.`;
+     courseData: GeneratedCourse,
+     organizationId: string,
+     language: string,
++    size: CourseSize,
++    provider?: 'meta',
+   ): Promise<any> {
+     const db = await getDb();
+ 
+@@ -233,7 +260,15 @@ Ensure comprehensionQuestions has exactly 3 items per day.`;
+       title: courseData.title,
+       description: courseData.description,
+       status: 'published',
+-      settings: { language, aiGenerated: true, totalDays: courseData.days.length },
++      settings: {
++        language,
++        aiGenerated: true,
++        totalDays: courseData.days.length,
++        size,
++        ...(provider === 'meta'
++          ? { generator: { provider: 'meta', model: process.env.META_MODEL_ID || 'muse-spark-1.3' } }
++          : {}),
++      },
+     });
+ 
+     // 2. Flatten days → modules, save each as a lesson row with day_number

@@ -12,7 +12,7 @@ const DEFAULT_BASE_URL = 'https://api.meta.ai/v1';
 const DEFAULT_MODEL = 'muse-spark-1.3';
 const REASONING_HEADROOM = 4000;
 const MAX_COMPLETION_TOKENS = 16000;
-const REQUEST_TIMEOUT_MS = 90_000;
+const REQUEST_TIMEOUT_MS = 240_000;
 
 class MetaModelClient {
   isAvailable(): boolean {
