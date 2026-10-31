@@ -31,9 +31,13 @@ class FakeQueueDao : SyncQueueDao {
     }
 }
 
-class FakeConnectivity(var online: Boolean = true) : Connectivity {
-    override fun isOnline() = online
-    override fun onlineFlow() = MutableStateFlow(online)
+class FakeConnectivity(initial: Boolean = true) : Connectivity {
+    private val state = MutableStateFlow(initial)
+    var online: Boolean
+        get() = state.value
+        set(value) { state.value = value }
+    override fun isOnline() = state.value
+    override fun onlineFlow(): Flow<Boolean> = state
 }
 
 class FakeApi : LearnerSyncApi {
@@ -74,3 +78,35 @@ fun sampleBundle(courseId: String = "course-1", lessonId: String = "lesson-1") =
         )
     )
 )
+
+class FakeEngine : org.ekatra.alfred.InferenceEngine {
+    var loadOk = true
+    var loadCalls = 0
+    var tokens: List<String> = listOf("Half of 10 ", "is 5.")
+    var failWith: Exception? = null
+    var hang = false
+    val prompts = mutableListOf<String>()
+    var mutexHeldWhileGenerating: Boolean? = null
+    lateinit var mutex: kotlinx.coroutines.sync.Mutex
+
+    override fun isReady() = true
+    override suspend fun loadModel(modelFile: java.io.File): Boolean { loadCalls++; return loadOk }
+    override fun generateRaw(prompt: String): Flow<String> = kotlinx.coroutines.flow.flow {
+        prompts += prompt
+        mutexHeldWhileGenerating = mutex.isLocked
+        failWith?.let { throw it }
+        if (hang) kotlinx.coroutines.awaitCancellation()
+        tokens.forEach { emit(it) }
+    }
+    override fun clearContext() {}
+    override fun setSystemPrompt(prompt: String) {}
+}
+
+class FakeLocator(var model: LocatedModel? = LocatedModel("llama-3.2-1b-instruct", java.io.File("/models/llama.gguf"))) : ModelLocator {
+    override fun locate() = model
+}
+
+class FakeTrigger : SyncTrigger {
+    var count = 0
+    override fun enqueue() { count++ }
+}

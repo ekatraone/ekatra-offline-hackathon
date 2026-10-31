@@ -1,0 +1,376 @@
+package org.ekatra.alfred.lessons
+
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.setMain
+import org.ekatra.alfred.persona.ActivePersona
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Test
+import java.io.File
+import java.nio.file.Files
+
+@OptIn(ExperimentalCoroutinesApi::class)
+class LessonsViewModelTest {
+
+    private lateinit var dir: File
+    private lateinit var dao: FakeQueueDao
+    private lateinit var api: FakeApi
+    private lateinit var net: FakeConnectivity
+    private lateinit var bundles: LessonStore
+    private lateinit var progress: LessonProgressStore
+    private lateinit var engine: FakeEngine
+    private lateinit var locator: FakeLocator
+    private lateinit var trigger: FakeTrigger
+    private val mutex = Mutex()
+    private lateinit var manager: LearnerSyncManager
+    private lateinit var vm: LessonsViewModel
+
+    private val course = "course-1"
+    private val lesson = "lesson-1"
+
+    @Before
+    fun setup() {
+        Dispatchers.setMain(UnconfinedTestDispatcher())
+        dir = Files.createTempDirectory("lessons-vm").toFile()
+        dao = FakeQueueDao(); api = FakeApi(); net = FakeConnectivity(true)
+        bundles = LessonStore(File(dir, "lessons")); progress = LessonProgressStore(File(dir, "p.json"))
+        engine = FakeEngine().also { it.mutex = mutex }
+        locator = FakeLocator(); trigger = FakeTrigger()
+        bundles.save(sampleBundle(course, lesson))
+    }
+
+    @After
+    fun tearDown() { Dispatchers.resetMain(); dir.deleteRecursively() }
+
+    private fun newVm(config: SyncConfig = SyncConfig("http://x", "tok")): LessonsViewModel {
+        manager = LearnerSyncManager(api, dao, bundles, progress, config, net)
+        return LessonsViewModel(manager, bundles, progress, net, engine, locator, trigger, mutex, ActivePersona)
+            .also { vm = it }
+    }
+
+    private fun queuedEvents() = dao.items.filter { it.type == "learner_event" }
+        .map { com.google.gson.Gson().fromJson(it.payload, LearnerEvent::class.java) }
+
+    private fun openQuiz() {
+        vm.openLesson(course, lesson)
+        vm.startQuiz()
+    }
+
+    // ---- grading and events ----
+
+    @Test
+    fun `a correct answer is graded locally, recorded and queued without waking the model`() = runTest {
+        newVm().also { net.online = false }
+        openQuiz()
+
+        vm.answer("B") // 1/2 of 10 is 5
+
+        val ui = vm.uiState.value
+        assertEquals(true, ui.quiz.correct)
+        assertEquals(1, ui.quiz.correctCount)
+        assertEquals(ExplainState.Idle, ui.explain)
+        assertEquals(0, engine.prompts.size)
+        assertEquals(true, progress.answerFor("q1")?.correct)
+        val ev = queuedEvents().single()
+        assertEquals("quiz_answered", ev.type)
+        assertEquals("q1", ev.questionId); assertEquals("B", ev.answer); assertEquals(true, ev.clientCorrect)
+        assertEquals(course, ev.courseId); assertEquals(lesson, ev.lessonId)
+        assertTrue(trigger.count >= 1)
+    }
+
+    @Test
+    fun `a second tap on the same question is ignored`() = runTest {
+        newVm().also { net.online = false }
+        openQuiz()
+        vm.answer("A"); vm.answer("B")
+
+        assertEquals(1, queuedEvents().size)
+        assertEquals("A", vm.uiState.value.quiz.selected)
+    }
+
+    @Test
+    fun `answers only count while the quiz is open`() = runTest {
+        newVm().also { net.online = false }
+        vm.openLesson(course, lesson) // READ stage
+        vm.answer("B")
+        assertTrue(queuedEvents().isEmpty())
+    }
+
+    @Test
+    fun `finishing a lesson marks it complete, queues lesson_completed and reaches the done screen`() = runTest {
+        newVm().also { net.online = false }
+        openQuiz()
+        vm.answer("B"); vm.next()
+        assertEquals(1, vm.uiState.value.quiz.index)
+        vm.answer("C"); vm.next() // q2 correct answer is A, so this one is wrong
+
+        val ui = vm.uiState.value
+        assertEquals(Stage.DONE, (ui.screen as LessonsScreen.Lesson).stage)
+        assertEquals(1, ui.quiz.correctCount)
+        assertTrue(lesson in ui.completed)
+        assertEquals(listOf("quiz_answered", "quiz_answered", "lesson_completed"), queuedEvents().map { it.type })
+    }
+
+    // ---- Maya explains ----
+
+    @Test
+    fun `a wrong answer streams an explanation from the on-device model under the shared mutex`() = runTest {
+        newVm()
+        net.online = false
+        openQuiz()
+
+        vm.answer("A") // wrong
+
+        val explain = vm.uiState.value.explain
+        assertEquals(ExplainState.Done("Half of 10 is 5."), explain)
+        assertEquals(1, engine.loadCalls)
+        assertEquals(true, engine.mutexHeldWhileGenerating)
+        assertFalse("mutex must be released afterwards", mutex.isLocked)
+
+        val prompt = engine.prompts.single()
+        assertTrue(prompt.startsWith("<|start_header_id|>system<|end_header_id|>"))
+        assertFalse(prompt.contains("<|begin_of_text|>"))
+        assertTrue("lesson text in prompt", prompt.contains("A half is *one of two* equal parts."))
+        assertTrue("question in prompt", prompt.contains("What is 1/2 of 10?"))
+        assertTrue("chosen answer in prompt", prompt.contains("Student chose A: 2"))
+        assertTrue("correct answer in prompt", prompt.contains("Correct answer B: 5"))
+        assertTrue(prompt.endsWith("<|start_header_id|>assistant<|end_header_id|>\n\n"))
+    }
+
+    @Test
+    fun `lesson text in the explain prompt is trimmed to about 1200 characters`() = runTest {
+        val long = sampleBundle(course, lesson).let { b ->
+            b.copy(lessons = b.lessons.map { it.copy(content = "x".repeat(5000)) })
+        }
+        bundles.save(long)
+        newVm(); net.online = false
+        openQuiz()
+        vm.answer("A")
+
+        val prompt = engine.prompts.single()
+        assertTrue(prompt.contains("x".repeat(1200)))
+        assertFalse(prompt.contains("x".repeat(1201)))
+    }
+
+    @Test
+    fun `without a downloaded model the lesson's own explanation is shown`() = runTest {
+        locator.model = null
+        newVm(); net.online = false
+        openQuiz()
+
+        vm.answer("A")
+
+        assertEquals(ExplainState.Fallback("Half of ten is five."), vm.uiState.value.explain)
+        assertEquals(0, engine.prompts.size)
+    }
+
+    @Test
+    fun `an engine failure falls back to the lesson's explanation`() = runTest {
+        engine.failWith = IllegalStateException("prompt too long")
+        newVm(); net.online = false
+        openQuiz()
+
+        vm.answer("A")
+
+        assertEquals(ExplainState.Fallback("Half of ten is five."), vm.uiState.value.explain)
+        assertFalse(mutex.isLocked)
+    }
+
+    @Test
+    fun `a model that fails to load falls back`() = runTest {
+        engine.loadOk = false
+        newVm(); net.online = false
+        openQuiz()
+        vm.answer("A")
+        assertTrue(vm.uiState.value.explain is ExplainState.Fallback)
+    }
+
+    @Test
+    fun `a model that never produces a token is cut off by the first-token watchdog`() = runTest {
+        engine.hang = true
+        newVm(); net.online = false
+        vm.firstTokenTimeoutMs = 1_000
+        openQuiz()
+
+        vm.answer("A")
+        assertEquals(ExplainState.Loading, vm.uiState.value.explain)
+        advanceTimeBy(1_001)
+
+        assertEquals(ExplainState.Fallback("Half of ten is five."), vm.uiState.value.explain)
+        assertFalse("mutex must be released after a timeout", mutex.isLocked)
+    }
+
+    @Test
+    fun `moving to the next question clears the explanation`() = runTest {
+        newVm(); net.online = false
+        openQuiz()
+        vm.answer("A")
+        vm.next()
+        assertEquals(ExplainState.Idle, vm.uiState.value.explain)
+        assertNull(vm.uiState.value.quiz.selected)
+    }
+
+    // ---- asking for lessons ----
+
+    @Test
+    fun `asking offline queues the request for later`() = runTest {
+        newVm(); net.online = false
+
+        assertTrue(vm.askForLesson("  photosynthesis "))
+
+        assertEquals(listOf("photosynthesis"), vm.uiState.value.pendingTopics)
+        assertEquals("Will be created when you're back online", vm.uiState.value.notice)
+        assertTrue(api.lessonCalls.isEmpty())
+        assertTrue(trigger.count >= 1)
+        assertEquals(1, dao.items.count { it.type == "lesson_request" })
+    }
+
+    @Test
+    fun `asking online generates now and the bundle lands in the list`() = runTest {
+        api.lessonResult = { _, _, _ -> ApiResult.Ok(RequestLessonResult("course-2", sampleBundle("course-2", "lesson-9"))) }
+        newVm()
+
+        assertTrue(vm.askForLesson("decimals"))
+
+        assertEquals("decimals", api.lessonCalls.single().first)
+        assertEquals("en", api.lessonCalls.single().second)
+        assertFalse(vm.uiState.value.requesting)
+        assertNotNull(bundles.get("course-2"))
+        assertTrue(vm.uiState.value.bundles.any { it.course.id == "course-2" })
+        assertTrue(dao.items.none { it.type == "lesson_request" })
+    }
+
+    @Test
+    fun `a request that dies mid-call stays queued under the same id`() = runTest {
+        api.lessonResult = { _, _, _ -> ApiResult.Retryable("connection reset") }
+        newVm()
+
+        vm.askForLesson("decimals")
+
+        val sent = api.lessonCalls.single().third
+        val queued = dao.items.single { it.type == "lesson_request" }
+        assertTrue(queued.payload.contains(sent))
+        assertEquals(listOf("decimals"), vm.uiState.value.pendingTopics)
+    }
+
+    @Test
+    fun `a server rejection is shown to the learner`() = runTest {
+        api.lessonResult = { _, _, _ -> ApiResult.Rejected(400, "topic must be 2-120 characters") }
+        newVm()
+
+        vm.askForLesson("ab")
+
+        assertEquals("Couldn't create lesson: topic must be 2-120 characters", vm.uiState.value.notice)
+        assertTrue(dao.items.none { it.type == "lesson_request" })
+        assertFalse(vm.uiState.value.requesting)
+    }
+
+    @Test
+    fun `bad topics are refused locally`() = runTest {
+        newVm()
+        assertFalse(vm.askForLesson("a"))
+        assertFalse(vm.askForLesson("   "))
+        assertFalse(vm.askForLesson("x".repeat(121)))
+        assertTrue(dao.items.isEmpty())
+        assertTrue(api.lessonCalls.isEmpty())
+    }
+
+    @Test
+    fun `an unconfigured build refuses and says so`() = runTest {
+        newVm(SyncConfig("", ""))
+        assertFalse(vm.uiState.value.configured)
+        assertFalse(vm.askForLesson("fractions"))
+        assertEquals("Lessons aren't set up on this build.", vm.uiState.value.notice)
+    }
+
+    // ---- sync on reconnect, chip, navigation ----
+
+    @Test
+    fun `coming back online syncs the queue within the same collector`() = runTest {
+        newVm(); net.online = false
+        openQuiz()
+        vm.answer("B")
+        assertEquals(1, queuedEvents().size)
+        assertTrue(api.eventBatches.isEmpty())
+
+        net.online = true
+
+        assertEquals(1, api.eventBatches.size)
+        assertTrue(dao.items.isEmpty())
+    }
+
+    @Test
+    fun `the sync chip counts waiting updates and flips to synced`() = runTest {
+        newVm(); net.online = false
+        openQuiz()
+        vm.answer("B")
+        assertEquals("1 update waiting", syncChipText(vm.uiState.value))
+
+        net.online = true
+
+        assertEquals(0, vm.uiState.value.pendingCount)
+        assertEquals("Synced ✓", syncChipText(vm.uiState.value))
+    }
+
+    @Test
+    fun `the chip reports an unconfigured build and an expired sign-in`() {
+        assertEquals("Not configured", syncChipText(LessonsUiState(configured = false)))
+        assertEquals("Sign-in expired", syncChipText(LessonsUiState(configured = true, syncStatus = SyncStatus.UNAUTHORIZED)))
+        assertEquals("3 updates waiting", syncChipText(LessonsUiState(configured = true, pendingCount = 3)))
+    }
+
+    @Test
+    fun `the completion screen gets the server profile after sync`() = runTest {
+        api.eventsResult = { evs ->
+            ApiResult.Ok(EventsResponse(
+                accepted = evs.map { it.clientEventId },
+                profile = ServerProfile(mastery = mapOf(lesson to 0.75), struggles = emptyList())
+            ))
+        }
+        newVm()
+        openQuiz()
+        vm.answer("B"); vm.next(); vm.answer("A"); vm.next()
+
+        assertEquals(0.75, vm.uiState.value.profile!!.mastery[lesson]!!, 0.0)
+        assertEquals(Stage.DONE, (vm.uiState.value.screen as LessonsScreen.Lesson).stage)
+    }
+
+    @Test
+    fun `back steps out of a lesson, then leaves the activity`() = runTest {
+        newVm(); net.online = false
+        openQuiz()
+        assertTrue(vm.back())
+        assertEquals(LessonsScreen.Home, vm.uiState.value.screen)
+        assertFalse(vm.back())
+    }
+
+    @Test
+    fun `a review lesson with no text opens straight on its quiz`() = runTest {
+        val b = sampleBundle(course, lesson)
+        val review = b.lessons.single().copy(id = "review-1", kind = "review", content = "", order = 4)
+        bundles.save(b.copy(lessons = b.lessons + review))
+        newVm(); net.online = false
+
+        vm.openLesson(course, "review-1")
+
+        assertEquals(Stage.QUIZ, (vm.uiState.value.screen as LessonsScreen.Lesson).stage)
+    }
+
+    @Test
+    fun `lesson markup renders bold and drops the asterisks`() {
+        val t = lessonText("A half is *one of two* parts.\n\nNext **bold** too.")
+        assertEquals("A half is one of two parts.\n\nNext bold too.", t.text)
+        assertEquals(2, t.spanStyles.size)
+    }
+}

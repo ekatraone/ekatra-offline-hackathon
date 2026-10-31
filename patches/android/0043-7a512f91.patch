@@ -1,0 +1,58 @@
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index ed05c78..146639d 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -57,6 +57,13 @@
+             android:windowSoftInputMode="adjustResize"
+             android:theme="@style/Theme.Ekatra.NoActionBar" />
+         
++        <!-- Lessons (Maya): generated micro lessons, offline quiz, synced progress -->
++        <activity
++            android:name=".LessonsActivity"
++            android:exported="false"
++            android:windowSoftInputMode="adjustResize"
++            android:theme="@style/Theme.Ekatra.NoActionBar" />
++
+         <!-- Settings Screen -->
+         <activity
+             android:name=".SettingsActivity"
+diff --git a/app/src/main/java/org/ekatra/alfred/NativeChatActivity.kt b/app/src/main/java/org/ekatra/alfred/NativeChatActivity.kt
+index 2eaac0a..86018f5 100644
+--- a/app/src/main/java/org/ekatra/alfred/NativeChatActivity.kt
++++ b/app/src/main/java/org/ekatra/alfred/NativeChatActivity.kt
+@@ -100,6 +100,9 @@ class NativeChatActivity : ComponentActivity() {
+                         onSettingsClick = {
+                             startActivity(Intent(this, SettingsActivity::class.java))
+                         },
++                        onLessonsClick = if (ActivePersona.key == "maya") {
++                            { startActivity(Intent(this, LessonsActivity::class.java)) }
++                        } else null,
+                         onHotspotToggle = { enable ->
+                             if (enable) {
+                                 startService(Intent(this, AlfredServerService::class.java))
+diff --git a/app/src/main/java/org/ekatra/alfred/ui/chat/ChatScreen.kt b/app/src/main/java/org/ekatra/alfred/ui/chat/ChatScreen.kt
+index 2c666c1..e9eae92 100644
+--- a/app/src/main/java/org/ekatra/alfred/ui/chat/ChatScreen.kt
++++ b/app/src/main/java/org/ekatra/alfred/ui/chat/ChatScreen.kt
+@@ -75,6 +75,8 @@ fun ChatScreen(
+     modelFile: File,
+     onSettingsClick: () -> Unit,
+     onHotspotToggle: (Boolean) -> Unit,
++    /** Opens Lessons. Null hides the icon (Asmaa has no Lessons). */
++    onLessonsClick: (() -> Unit)? = null,
+     viewModel: ChatViewModel = hiltViewModel()
+ ) {
+     val scope = rememberCoroutineScope()
+@@ -410,6 +412,12 @@ fun ChatScreen(
+                         )
+                     }
+                     
++                    if (onLessonsClick != null) {
++                        IconButton(onClick = onLessonsClick) {
++                            Text("📚", fontSize = 20.sp)
++                        }
++                    }
++
+                     // Settings Button
+                     IconButton(onClick = onSettingsClick) {
+                         Text("⚙️", fontSize = 20.sp)
