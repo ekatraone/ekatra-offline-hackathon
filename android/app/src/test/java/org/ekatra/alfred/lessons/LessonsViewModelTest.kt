@@ -506,7 +506,8 @@ class LessonsViewModelTest {
     fun `the explainer waits 25 seconds for a first token while chat keeps 120`() = runTest {
         assertEquals(25_000L, LessonsViewModel.EXPLAIN_FIRST_TOKEN_MS)
         assertEquals(10_000L, LessonsViewModel.EXPLAIN_MUTEX_WAIT_MS)
-        assertEquals(120_000L, ActivePersona.firstTokenTimeoutMs)
+        // Chat keeps its own, longer, persona timeout (120 s for Maya); the explainer never uses it.
+        assertTrue(ActivePersona.firstTokenTimeoutMs > LessonsViewModel.EXPLAIN_FIRST_TOKEN_MS)
         engine.hang = true
         newVm(); net.online = false
         openQuiz()
