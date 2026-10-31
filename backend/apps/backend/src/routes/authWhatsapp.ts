@@ -14,11 +14,14 @@ import rateLimit from 'express-rate-limit';
 import { logger } from '../lib/logger.js';
 import { FirebaseAuthLike, getFirebaseAuth } from '../lib/firebaseAdmin.js';
 import { E164_RE, phoneDigits } from '../services/learnerIdentity.js';
-import { CODE_TTL_SECONDS, OtpProvider, RESEND_AFTER_SECONDS, selectOtpProvider } from '../services/whatsappOtp.js';
+import { CODE_TTL_SECONDS, OtpDb, OtpProvider, RESEND_AFTER_SECONDS, selectOtpProvider } from '../services/whatsappOtp.js';
+import { OtpLimits } from '../services/otpLimits.js';
 
 export interface WhatsappAuthDeps {
   otp: () => OtpProvider | null;
   firebase: () => FirebaseAuthLike | null;
+  /** Durable abuse caps (per-phone daily limits, lock, global daily cap). */
+  limits: OtpLimits;
 }
 
 type PhoneRequest = Request & { signInPhone?: string };
@@ -33,7 +36,7 @@ const limited = (windowMs: number, max: number, error: string, keyGenerator?: (r
     message: { success: false, error },
   });
 
-export function createWhatsappAuthRouter({ otp, firebase }: WhatsappAuthDeps): Router {
+export function createWhatsappAuthRouter({ otp, firebase, limits }: WhatsappAuthDeps): Router {
   const router = Router();
 
   // Neither route does anything (or burns a code) unless sign-in is fully configured.
@@ -63,6 +66,17 @@ export function createWhatsappAuthRouter({ otp, firebase }: WhatsappAuthDeps): R
     limited(15 * 60_000, 3, 'Too many codes requested for this number. Please try again later.', (req) => (req as PhoneRequest).signInPhone ?? 'unknown'),
     async (req: PhoneRequest, res: Response) => {
       try {
+        void limits.purge();
+        const verdict = await limits.claimStart(req.signInPhone!);
+        if (verdict === 'global_cap') {
+          res.status(503).json({ success: false, error: 'Sign-in is temporarily unavailable. Please try again later.' });
+          return;
+        }
+        if (verdict !== 'ok') {
+          // phone_cap and locked look the same from outside
+          res.status(429).json({ success: false, error: 'Too many codes requested for this number. Please try again later.' });
+          return;
+        }
         await otp()!.start(req.signInPhone!);
         // The same answer whether or not the number belongs to a known learner.
         res.json({ success: true, data: { resendAfterSeconds: RESEND_AFTER_SECONDS, expiresInSeconds: CODE_TTL_SECONDS } });
@@ -86,7 +100,12 @@ export function createWhatsappAuthRouter({ otp, firebase }: WhatsappAuthDeps): R
           return;
         }
         const phone = req.signInPhone!;
+        if (await limits.isLocked(phone)) {
+          res.status(429).json({ success: false, error: 'Too many wrong attempts. Please try again later.' });
+          return;
+        }
         const result = await otp()!.check(phone, code);
+        if (result === 'wrong') await limits.recordWrong(phone);
         if (result === 'locked') {
           res.status(429).json({ success: false, error: 'Too many wrong attempts. Please request a new code.' });
           return;
@@ -110,8 +129,9 @@ export function createWhatsappAuthRouter({ otp, firebase }: WhatsappAuthDeps): R
 /** Production wiring: the real database, Firebase Admin and the configured code provider. */
 export function createDefaultWhatsappAuthRouter(): Router {
   let provider: OtpProvider | null | undefined;
-  const db = { raw: async (sql: string, params?: any[]) => (await import('@ekatra/database')).db.raw(sql, params) };
+  const db: OtpDb = { raw: async (sql: string, params?: any[]) => (await import('@ekatra/database')).db.raw(sql, params) };
   return createWhatsappAuthRouter({
+    limits: new OtpLimits(db),
     firebase: getFirebaseAuth,
     otp: () => (provider === undefined ? (provider = selectOtpProvider(db)) : provider),
   });

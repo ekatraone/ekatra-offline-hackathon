@@ -7,6 +7,7 @@ import type { Server } from 'node:http';
 import express from 'express';
 import { createWhatsappAuthRouter } from '../authWhatsapp.js';
 import { ChallengeOtpProvider, OtpProvider } from '../../services/whatsappOtp.js';
+import { OtpLimits } from '../../services/otpLimits.js';
 import { makeAuthDb, makeFirebase } from './fakeAuthDb.js';
 
 const PHONE = '+919876543210';
@@ -20,7 +21,7 @@ afterEach(() => {
   Object.assign(process.env, savedEnv);
 });
 
-async function startApp(opts: { firebase?: boolean; otp?: boolean; now?: () => number } = {}) {
+async function startApp(opts: { firebase?: boolean; otp?: boolean; now?: () => number; env?: Record<string, string> } = {}) {
   const db = makeAuthDb();
   const sent: { phone: string; code: string }[] = [];
   const firebase = makeFirebase();
@@ -30,6 +31,7 @@ async function startApp(opts: { firebase?: boolean; otp?: boolean; now?: () => n
   app.use('/api/auth/whatsapp', createWhatsappAuthRouter({
     otp: () => (opts.otp === false ? null : provider),
     firebase: () => (opts.firebase === false ? null : firebase),
+    limits: new OtpLimits(db, opts.env ?? {}),
   }));
   const server = await new Promise<Server>((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   servers.push(server);
@@ -94,7 +96,7 @@ test('start: a delivery failure is a 502 that does not leak whether the number i
   const app = express();
   app.use(express.json());
   const failing: OtpProvider = { name: 'f', start: async () => { throw new Error('twilio down'); }, check: async () => 'wrong' };
-  app.use('/w', createWhatsappAuthRouter({ otp: () => failing, firebase: () => makeFirebase() }));
+  app.use('/w', createWhatsappAuthRouter({ otp: () => failing, firebase: () => makeFirebase(), limits: new OtpLimits(makeAuthDb(), {}) }));
   const server = await new Promise<Server>((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   servers.push(server);
   const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/w/start`, {
@@ -170,4 +172,72 @@ test('codes are never written to the log in production', async () => {
   } finally {
     (logger as any).info = origInfo; (logger as any).warn = origWarn; (logger as any).error = origError;
   }
+});
+
+// ── durable abuse caps ─────────────────────────────────────────────────────
+
+test('start: a global daily cap (OTP_DAILY_CAP) answers 503 "temporarily unavailable" and sends nothing more', async () => {
+  const { post, sent } = await startApp({ env: { OTP_DAILY_CAP: '2' } });
+  assert.equal((await post('/start', { phone: '+919000000001' })).status, 200);
+  assert.equal((await post('/start', { phone: '+919000000002' })).status, 200);
+  const capped = await post('/start', { phone: '+919000000003' });
+  assert.equal(capped.status, 503);
+  assert.match(((await capped.json()) as any).error, /temporarily unavailable/);
+  assert.equal(sent.length, 2);
+});
+
+test('start and verify: a phone under a 24 h lock gets 429 on both, even with the right code', async () => {
+  const { post, sent, db } = await startApp();
+  await post('/start', { phone: PHONE });
+  db.events.push({ phone: PHONE, kind: 'lock', at: Date.now() });
+  assert.equal((await post('/start', { phone: PHONE })).status, 429);
+  assert.equal((await post('/verify', { phone: PHONE, code: sent[0].code })).status, 429);
+  assert.equal(db.challenges[0].attempts, 0); // the lock short-circuits before the code is even checked
+});
+
+test('verify: wrong guesses are recorded in the ledger (and only wrong ones)', async () => {
+  const { post, sent, db } = await startApp();
+  await post('/start', { phone: PHONE });
+  const wrong = sent[0].code === '000000' ? '111111' : '000000';
+  await post('/verify', { phone: PHONE, code: wrong });
+  await post('/verify', { phone: PHONE, code: wrong });
+  await post('/verify', { phone: PHONE, code: sent[0].code });
+  assert.deepEqual(db.events.map((e) => e.kind), ['start', 'wrong', 'wrong']);
+});
+
+test('the caps also apply on the Twilio Verify path (the ledger is provider-independent)', async () => {
+  const db = makeAuthDb();
+  let started = 0;
+  const verifyLike: OtpProvider = { name: 'twilio-verify', start: async () => { started++; }, check: async () => 'wrong' };
+  const app = express();
+  app.use(express.json());
+  app.use('/w', createWhatsappAuthRouter({ otp: () => verifyLike, firebase: () => makeFirebase(), limits: new OtpLimits(db, { OTP_DAILY_CAP: '1' }) }));
+  const server = await new Promise<Server>((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+  servers.push(server);
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/w`;
+  const post = (path: string, body: object) => fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  assert.equal((await post('/start', { phone: PHONE })).status, 200);
+  assert.equal((await post('/start', { phone: '+919000000009' })).status, 503);
+  assert.equal(started, 1);
+  await post('/verify', { phone: PHONE, code: '123456' });
+  assert.equal(db.events.filter((e) => e.kind === 'wrong').length, 1);
+});
+
+test('start purges stale sign-in rows opportunistically', async () => {
+  let t = Date.now();
+  const db = makeAuthDb([], () => t);
+  db.challenges.push({ id: 'old', phone: PHONE, code_hash: 'x', expires_at: new Date(t).toISOString(), attempts: 0, consumed_at: null, created_at: 1, at: t });
+  db.events.push({ phone: PHONE, kind: 'start', at: t });
+  t += 3 * 24 * 60 * 60 * 1000;
+  const app = express();
+  app.use(express.json());
+  const provider = new ChallengeOtpProvider('t', db, async () => undefined, () => 'k', () => t);
+  app.use('/w', createWhatsappAuthRouter({ otp: () => provider, firebase: () => makeFirebase(), limits: new OtpLimits(db, {}) }));
+  const server = await new Promise<Server>((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+  servers.push(server);
+  await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/w/start`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone: '+919000000004' }) });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(!db.challenges.some((c) => c.id === 'old'), 'the day-old challenge is gone');
+  assert.ok(!db.events.some((e) => e.phone === PHONE), 'the old ledger rows are gone');
+  assert.ok(db.challenges.some((c) => c.phone === '+919000000004'), 'the new challenge remains');
 });

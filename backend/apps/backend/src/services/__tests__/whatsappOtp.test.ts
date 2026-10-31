@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  ChallengeOtpProvider, TwilioVerifyProvider, twilioTemplateSender, mockSender, selectOtpProvider,
+  ChallengeOtpProvider, TwilioVerifyProvider, twilioTemplateSender, mockSender, selectOtpProvider, otpHmacSecret,
   CODE_TTL_SECONDS, MAX_CODE_ATTEMPTS,
 } from '../whatsappOtp.js';
 import { makeAuthDb } from '../../routes/__tests__/fakeAuthDb.js';
@@ -159,4 +159,30 @@ test('provider selection: Verify, then own template, then mock outside productio
   assert.equal(selectOtpProvider(db, { NODE_ENV: 'production' }), null);
   // Template ids without Twilio credentials or a sender number are not usable
   assert.equal(selectOtpProvider(db, { NODE_ENV: 'production', TWILIO_OTP_CONTENT_SID: 'HX1' }), null);
+});
+
+// ── key separation ─────────────────────────────────────────────────────────
+
+test('the code-hash key is OTP_HMAC_SECRET when set', () => {
+  assert.equal(otpHmacSecret({ OTP_HMAC_SECRET: 'dedicated', JWT_SECRET: 'jwt' }), 'dedicated');
+});
+
+test('without OTP_HMAC_SECRET the key is HKDF-derived from JWT_SECRET, and is never JWT_SECRET itself', () => {
+  const derived = otpHmacSecret({ JWT_SECRET: 'jwt-secret-value' });
+  assert.match(derived, /^[0-9a-f]{64}$/);
+  assert.notEqual(derived, 'jwt-secret-value');
+  assert.equal(otpHmacSecret({ JWT_SECRET: 'jwt-secret-value' }), derived); // deterministic across restarts
+  assert.notEqual(otpHmacSecret({ JWT_SECRET: 'another-secret' }), derived);
+});
+
+test('no key material at all means no key (starting a code then refuses)', async () => {
+  assert.equal(otpHmacSecret({}), '');
+});
+
+test('codes hashed with the derived key do not verify under the raw JWT secret', async () => {
+  const db = makeAuthDb(); const sent: string[] = [];
+  const derived = new ChallengeOtpProvider('t', db, async (_p, c) => { sent.push(c); }, () => otpHmacSecret({ JWT_SECRET: 'jwt-secret-value' }));
+  await derived.start(PHONE);
+  const rawKey = new ChallengeOtpProvider('t', db, async () => undefined, () => 'jwt-secret-value');
+  assert.equal(await rawKey.check(PHONE, sent[0]), 'wrong');
 });

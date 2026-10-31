@@ -9,7 +9,7 @@
  * Production with none of these configured has no provider, and the routes answer 503.
  */
 
-import { createHmac, randomInt, timingSafeEqual } from 'node:crypto';
+import { createHmac, hkdfSync, randomInt, timingSafeEqual } from 'node:crypto';
 import { logger } from '../lib/logger.js';
 
 export const CODE_TTL_SECONDS = 600;
@@ -30,6 +30,16 @@ export interface OtpDb {
 }
 
 type Env = Record<string, string | undefined>;
+
+/**
+ * Key for hashing codes. OTP_HMAC_SECRET when set; otherwise derived from JWT_SECRET with HKDF and
+ * a fixed info string, so the code-hash key is never the JWT signing key itself.
+ */
+export function otpHmacSecret(env: Env = process.env): string {
+  if (env.OTP_HMAC_SECRET) return env.OTP_HMAC_SECRET;
+  if (!env.JWT_SECRET) return '';
+  return Buffer.from(hkdfSync('sha256', env.JWT_SECRET, '', 'ekatra/otp-code-hmac/v1', 32)).toString('hex');
+}
 
 // ── a. Twilio Verify ───────────────────────────────────────────────────────
 
@@ -73,7 +83,7 @@ export class ChallengeOtpProvider implements OtpProvider {
     readonly name: string,
     private db: OtpDb,
     private send: CodeSender,
-    private secret: () => string = () => process.env.JWT_SECRET || '',
+    private secret: () => string = () => otpHmacSecret(),
     private now: () => number = Date.now,
   ) {}
 
@@ -83,7 +93,7 @@ export class ChallengeOtpProvider implements OtpProvider {
   }
 
   async start(phone: string): Promise<void> {
-    if (!this.secret()) throw new Error('JWT_SECRET is required to hash sign-in codes');
+    if (!this.secret()) throw new Error('OTP_HMAC_SECRET or JWT_SECRET is required to hash sign-in codes');
     const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
     // A new code replaces any pending one for the number.
     await this.db.raw(`UPDATE otp_challenges SET consumed_at = NOW() WHERE phone = $1 AND consumed_at IS NULL`, [phone]);
