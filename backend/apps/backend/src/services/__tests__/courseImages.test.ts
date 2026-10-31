@@ -6,7 +6,11 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { CourseGeneratorService, buildCourseSettings } from '../courseGenerator.js';
-import { generateCourseImages, withImageStyle, IMAGE_STYLE_SUFFIX, mediaUrl, publicBaseUrl } from '../courseImages.js';
+import { generateCourseImages, withImageStyle, IMAGE_STYLE_SUFFIX, mediaPath, imageBudgetMs, publicBaseUrl } from '../courseImages.js';
+import { absoluteMediaUrl, isMediaPath, mediaIdFromPath } from '@ekatra/messaging';
+import { assertStorableJpeg, MAX_IMAGE_BYTES } from '../../lib/metaModelClient.js';
+
+const JPEG = (n = 10) => Buffer.concat([Buffer.from([0xff, 0xd8, 0xff]), Buffer.alloc(n)]);
 import { metaModelClient, metaModelId } from '../../lib/metaModelClient.js';
 
 const realFetch = globalThis.fetch;
@@ -82,10 +86,10 @@ test('createImage posts the image model request and returns the JPEG bytes', asy
   let seen: any;
   globalThis.fetch = (async (url: any, init: any) => {
     seen = { url: String(url), body: JSON.parse(init.body) };
-    return new Response(JSON.stringify({ data: [{ b64_json: Buffer.from('jpegbytes').toString('base64') }] }), { status: 200 });
+    return new Response(JSON.stringify({ data: [{ b64_json: JPEG(6).toString('base64') }] }), { status: 200 });
   }) as any;
   const img = await metaModelClient.createImage('a cat');
-  assert.equal(img.toString(), 'jpegbytes');
+  assert.deepEqual(img, JPEG(6));
   assert.equal(seen.url, 'https://models.test/v1/images/generations');
   assert.deepEqual(seen.body, { model: 'muse-image-1.0', prompt: 'a cat', n: 1, size: '1024x1024', output_format: 'jpeg' });
 });
@@ -119,20 +123,20 @@ test('every image prompt gets the fixed style suffix', () => {
   assert.match(IMAGE_STYLE_SUFFIX, /no text, no letters, no numbers/);
 });
 
-test('stores a cover and module images and points the course and lessons at absolute URLs', async () => {
+test('stores a cover and module images and points the course and lessons at relative paths', async () => {
   const db = imageDb(); const prompts: string[] = [];
   const res = await generateCourseImages('c1', [
     { kind: 'cover', lessonId: null, prompt: 'cover idea' },
     { kind: 'module', lessonId: 'l1', prompt: 'one' },
     { kind: 'module', lessonId: 'l2', prompt: 'two' },
-  ], { db, baseUrl: 'https://demo.example', createImage: async (p) => { prompts.push(p); return Buffer.alloc(10); } });
+  ], { db, createImage: async (p) => { prompts.push(p); return Buffer.alloc(10); } });
   assert.equal(res.stored, 3);
   assert.ok(prompts.every((p) => p.endsWith(IMAGE_STYLE_SUFFIX)));
   const cover = db.updates.find((u) => u.sql.includes('coverImageUrl'));
-  assert.equal(cover.p[0], 'https://demo.example/api/sync/media/media-1');
+  assert.equal(cover.p[0], '/api/sync/media/media-1');
   const lessonUpdates = db.updates.filter((u) => u.sql.includes('UPDATE lessons'));
   assert.deepEqual(lessonUpdates.map((u) => [u.p[1], u.p[0]]), [
-    ['l1', 'https://demo.example/api/sync/media/media-2'], ['l2', 'https://demo.example/api/sync/media/media-3']]);
+    ['l1', '/api/sync/media/media-2'], ['l2', '/api/sync/media/media-3']]);
 });
 
 test('image failures never fail the lesson: the rest are still stored', async () => {
@@ -141,7 +145,7 @@ test('image failures never fail the lesson: the rest are still stored', async ()
     { kind: 'cover', lessonId: null, prompt: 'cover' },
     { kind: 'module', lessonId: 'l1', prompt: 'boom' },
     { kind: 'module', lessonId: 'l2', prompt: 'ok' },
-  ], { db, baseUrl: 'https://x', createImage: async (p) => { if (p.startsWith('boom')) throw new Error('muse image down'); return Buffer.alloc(5); } });
+  ], { db, createImage: async (p) => { if (p.startsWith('boom')) throw new Error('muse image down'); return Buffer.alloc(5); } });
   assert.deepEqual([res.stored, res.failed], [2, 1]);
   assert.equal(db.media.length, 2);
   assert.equal(db.updates.filter((u) => u.sql.includes('UPDATE lessons')).length, 1);
@@ -151,18 +155,70 @@ test('the overall budget stops the wait on slow images', async () => {
   const db = imageDb();
   const started = Date.now();
   const res = await generateCourseImages('c1', [{ kind: 'cover', lessonId: null, prompt: 'slow' }], {
-    db, baseUrl: 'https://x', budgetMs: 30, createImage: () => new Promise(() => undefined),
+    db, budgetMs: 30, createImage: () => new Promise(() => undefined),
   });
   assert.ok(Date.now() - started < 1000);
   assert.deepEqual([res.stored, res.failed], [0, 1]);
 });
 
-test('image URLs use PUBLIC_BASE_URL, then WEBHOOK_BASE_URL; production without either gets none', () => {
+test('images that miss the budget keep running and still attach in the background', async () => {
+  const db = imageDb();
+  let finish!: () => void;
+  const res = await generateCourseImages('c1', [{ kind: 'cover', lessonId: null, prompt: 'slow' }], {
+    db, budgetMs: 20, createImage: () => new Promise<Buffer>((r) => { finish = () => r(JPEG()); }),
+  });
+  assert.equal(res.stored, 0);
+  assert.equal(db.media.length, 0);
+  finish();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(db.media.length, 1);
+  assert.ok(db.updates.some((u) => u.sql.includes('coverImageUrl') && u.p[0] === '/api/sync/media/media-1'));
+});
+
+test('image budget is min(60 s, 240 s − elapsed − margin) and never negative', () => {
+  assert.equal(imageBudgetMs(10_000), 60_000);
+  assert.equal(imageBudgetMs(170_000), 55_000);
+  assert.equal(imageBudgetMs(230_000), 0);
+  assert.equal(imageBudgetMs(500_000), 0);
+});
+
+test('public base URL: PUBLIC_BASE_URL, then WEBHOOK_BASE_URL; production needs https', () => {
   assert.equal(publicBaseUrl({ PUBLIC_BASE_URL: 'https://a.test/', WEBHOOK_BASE_URL: 'https://b.test' }), 'https://a.test');
   assert.equal(publicBaseUrl({ WEBHOOK_BASE_URL: 'https://b.test' }), 'https://b.test');
   assert.equal(publicBaseUrl({ NODE_ENV: 'production' }), null);
+  assert.equal(publicBaseUrl({ NODE_ENV: 'production', PUBLIC_BASE_URL: 'http://insecure.test' }), null);
+  assert.equal(publicBaseUrl({ NODE_ENV: 'production', PUBLIC_BASE_URL: 'demo.up.railway.app' }), null);
   assert.equal(publicBaseUrl({ PORT: '4000' }), 'http://localhost:4000');
-  assert.equal(mediaUrl('https://a.test', 'abc'), 'https://a.test/api/sync/media/abc');
+});
+
+test('stored media values are relative; absolutized at use, and anything else is ignored', () => {
+  const id = '621c8ab0-aa14-4367-8b03-7b56caac9f33';
+  const env = { PUBLIC_BASE_URL: 'https://demo.test' };
+  assert.equal(mediaPath(id), `/api/sync/media/${id}`);
+  assert.equal(absoluteMediaUrl(mediaPath(id), env), `https://demo.test/api/sync/media/${id}`);
+  for (const junk of [`http://localhost:3001/api/sync/media/${id}`, '/api/sync/media/not-a-uuid', `/api/sync/media/${id}/x`,
+    `//evil.test/api/sync/media/${id}`, '', null, undefined, 42]) {
+    assert.equal(absoluteMediaUrl(junk, env), null, String(junk));
+    assert.equal(isMediaPath(junk), false);
+  }
+  assert.equal(mediaIdFromPath(mediaPath(id.toUpperCase())), id);
+  assert.equal(absoluteMediaUrl(mediaPath(id), { NODE_ENV: 'production' }), null);
+});
+
+test('only JPEG up to 2 MB is accepted as an image', () => {
+  assert.doesNotThrow(() => assertStorableJpeg(JPEG()));
+  assert.throws(() => assertStorableJpeg(Buffer.from('\x89PNG....')), /non-JPEG/);
+  assert.throws(() => assertStorableJpeg(Buffer.from('RIFFxxxxWEBP')), /non-JPEG/);
+  assert.throws(() => assertStorableJpeg(Buffer.alloc(0)), /non-JPEG/);
+  assert.throws(() => assertStorableJpeg(JPEG(MAX_IMAGE_BYTES)), /too large/);
+});
+
+test('createImage rejects a PNG or an oversized image, so nothing is inserted', async () => {
+  const respond = (buf: Buffer) => { globalThis.fetch = (async () => new Response(JSON.stringify({ data: [{ b64_json: buf.toString('base64') }] }), { status: 200 })) as any; };
+  respond(Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2]));
+  await assert.rejects(metaModelClient.createImage('x'), /non-JPEG/);
+  respond(JPEG(MAX_IMAGE_BYTES));
+  await assert.rejects(metaModelClient.createImage('x'), /too large/);
 });
 
 // ── Twilio sends images as media ───────────────────────────────────────────

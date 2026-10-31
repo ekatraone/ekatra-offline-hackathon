@@ -1,5 +1,5 @@
 /**
- * Generate one Muse Spark micro lesson from the command line (no learner involved).
+ * Generate one Muse micro lesson from the command line (no learner involved).
  *
  * Usage (hack env loaded; MODEL_API_KEY, META_MODEL_API_BASE_URL, META_MODEL_ID exported):
  *   npx tsx src/scripts/generateCourse.ts "<topic>" [language]

@@ -1,0 +1,92 @@
+diff --git a/apps/backend/src/lib/llm.ts b/apps/backend/src/lib/llm.ts
+index 0baa35af..cf58476c 100644
+--- a/apps/backend/src/lib/llm.ts
++++ b/apps/backend/src/lib/llm.ts
+@@ -3,7 +3,7 @@
+  *
+  * Prefers Anthropic/Claude (AZURE_ANTHROPIC_API_KEY); falls back to
+  * Azure OpenAI (AZURE_OPENAI_*) when Claude is not configured, then to the
+- * Meta Model API (MODEL_API_KEY). Pass `provider: 'meta'` to force Muse Spark.
++ * Meta Model API (MODEL_API_KEY). Pass `provider: 'meta'` to force the Meta (Muse) model.
+  * All clients return an OpenAI-style completion, so callers read
+  * `completion.choices[0].message.content` either way.
+  */
+diff --git a/apps/backend/src/services/courseGenerator.ts b/apps/backend/src/services/courseGenerator.ts
+index 399a661d..7637dcea 100644
+--- a/apps/backend/src/services/courseGenerator.ts
++++ b/apps/backend/src/services/courseGenerator.ts
+@@ -8,7 +8,7 @@
+ import { llmChat, llmSource } from '../lib/llm.js';
+ import { logger } from '../lib/logger.js';
+ import { metaModelClient, metaModelId } from '../lib/metaModelClient.js';
+-import { generateCourseImages, publicBaseUrl, ImageJob } from './courseImages.js';
++import { generateCourseImages, imageBudgetMs, publicBaseUrl, ImageJob } from './courseImages.js';
+ 
+ const getDb = () => import('@ekatra/database').then((m) => m.db);
+ 
+@@ -24,7 +24,7 @@ export interface CourseGenerationParams {
+   organizationId: string;
+   /** 'micro' = 1 day × 3 short modules; defaults to COURSE_SIZE env or 'standard'. */
+   size?: 'micro' | 'standard';
+-  /** Force a provider (e.g. 'meta' for Muse Spark) instead of the llmChat fallback chain. */
++  /** Force a provider (e.g. 'meta' for Muse) instead of the llmChat fallback chain. */
+   provider?: 'meta';
+   /** Skip the existing-course reuse check and always generate. */
+   force?: boolean;
+@@ -146,10 +146,11 @@ export class CourseGeneratorService {
+       }
+     }
+ 
++    const started = Date.now();
+     logger.info(`🎓 Generating ${size} course: "${topic}" (${numDays} days × ${numModules} modules, lang=${language})`);
+ 
+     const courseData = await this.callLLM(topic, goal, language, style, numDays, numModules, size, provider);
+-    const course = await this.saveToDB(courseData, organizationId, language, size, provider);
++    const course = await this.saveToDB(courseData, organizationId, language, size, provider, started);
+ 
+     logger.info(`✅ Course saved: ${course.id} — "${course.title}"`);
+     return course;
+@@ -282,21 +283,21 @@ Ensure comprehensionQuestions has exactly ${reviewCount} items per day.`;
+   }
+ 
+   /** Best-effort: never throws, so a lesson is never lost to an image problem. */
+-  private async attachImages(db: any, courseId: string, jobs: ImageJob[]): Promise<void> {
++  private async attachImages(db: any, courseId: string, jobs: ImageJob[], startedAt: number): Promise<void> {
+     if (!jobs.length || process.env.COURSE_IMAGES === 'off' || !metaModelClient.isAvailable()) return;
+     try {
+       const baseUrl = publicBaseUrl();
+       if (!baseUrl) {
+-        logger.warn('Skipping course images: set PUBLIC_BASE_URL (or WEBHOOK_BASE_URL) so image URLs are absolute');
++        logger.warn('Skipping course images: set PUBLIC_BASE_URL (or WEBHOOK_BASE_URL, https in production) so image links resolve');
+         return;
+       }
+-      const started = Date.now();
++      const imagesStarted = Date.now();
+       const result = await generateCourseImages(courseId, jobs, {
+         db,
+         createImage: (prompt) => metaModelClient.createImage(prompt),
+-        baseUrl,
++        budgetMs: imageBudgetMs(imagesStarted - startedAt),
+       });
+-      logger.info(`🖼️  Images for course ${courseId}: ${result.stored} stored, ${result.failed} failed in ${Date.now() - started}ms`);
++      logger.info(`🖼️  Images for course ${courseId}: ${result.stored} stored, ${result.failed} failed in ${Date.now() - imagesStarted}ms`);
+     } catch (err: any) {
+       logger.warn(`Image generation skipped for course ${courseId}: ${err?.message}`);
+     }
+@@ -308,6 +309,7 @@ Ensure comprehensionQuestions has exactly ${reviewCount} items per day.`;
+     language: string,
+     size: CourseSize,
+     provider?: 'meta',
++    startedAt: number = Date.now(),
+   ): Promise<any> {
+     const db = await getDb();
+ 
+@@ -391,7 +393,7 @@ Ensure comprehensionQuestions has exactly ${reviewCount} items per day.`;
+     const totalModules = courseData.days.reduce((sum, d) => sum + d.modules.length, 0);
+     logger.info(`✅ Saved ${courseData.days.length} days / ${totalModules} modules for course ${course.id}`);
+ 
+-    await this.attachImages(db, course.id, imageJobs);
++    await this.attachImages(db, course.id, imageJobs, startedAt);
+     return course;
+   }
+ }

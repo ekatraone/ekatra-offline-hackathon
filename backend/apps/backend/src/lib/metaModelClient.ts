@@ -1,8 +1,8 @@
 /**
- * Meta Model API client (Muse Spark).
+ * Meta Model API client (Muse).
  *
  * OpenAI-compatible Chat Completions at META_MODEL_API_BASE_URL. Server-side only.
- * Muse Spark always reasons, so reasoning tokens count against max_completion_tokens;
+ * Muse models always reason, so reasoning tokens count against max_completion_tokens;
  * the budget below is padded to leave room for visible output.
  */
 
@@ -15,6 +15,17 @@ const REASONING_HEADROOM = 4000;
 const MAX_COMPLETION_TOKENS = 16000;
 const REQUEST_TIMEOUT_MS = 240_000;
 const IMAGE_TIMEOUT_MS = 90_000;
+
+export const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
+
+/** Only JPEG (FF D8 FF) up to 2 MB is stored or served; anything else counts as an image failure. */
+export function assertStorableJpeg(image: Buffer): Buffer {
+  if (image.length < 3 || image[0] !== 0xff || image[1] !== 0xd8 || image[2] !== 0xff) {
+    throw new Error('Meta image API returned a non-JPEG image');
+  }
+  if (image.length > MAX_IMAGE_BYTES) throw new Error(`Meta image is too large (${image.length} bytes)`);
+  return image;
+}
 
 /** The model actually used for chat completions (META_MODEL_ID, else the default). */
 export function metaModelId(): string {
@@ -95,7 +106,7 @@ class MetaModelClient {
     const body: any = await res.json();
     const b64 = body?.data?.[0]?.b64_json;
     if (typeof b64 !== 'string' || !b64) throw new Error('Meta image API returned no image');
-    return Buffer.from(b64, 'base64');
+    return assertStorableJpeg(Buffer.from(b64, 'base64'));
   }
 }
 

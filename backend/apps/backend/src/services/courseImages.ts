@@ -3,10 +3,22 @@
  * Failures are logged and never fail the lesson; a lesson without an image is still valid.
  */
 
+import { publicBaseUrl } from '@ekatra/messaging';
 import { logger } from '../lib/logger.js';
 
+export { publicBaseUrl };
+
 export const IMAGE_STYLE_SUFFIX = 'flat, friendly educational illustration, bright colors, no text, no letters, no numbers';
-export const IMAGE_BUDGET_MS = 90_000;
+/** Longest the request waits for images; the rest attach in the background. */
+export const IMAGE_BUDGET_MS = 60_000;
+/** The whole lesson request (text + images) should finish within this. */
+export const REQUEST_DEADLINE_MS = 240_000;
+const DEADLINE_MARGIN_MS = 15_000;
+
+/** Wait for images min(60 s, 240 s − time already spent − margin); never negative. */
+export function imageBudgetMs(elapsedMs: number): number {
+  return Math.max(0, Math.min(IMAGE_BUDGET_MS, REQUEST_DEADLINE_MS - elapsedMs - DEADLINE_MARGIN_MS));
+}
 
 export const withImageStyle = (prompt: string) => `${prompt.trim().replace(/[.\s]+$/, '')}. ${IMAGE_STYLE_SUFFIX}`;
 
@@ -23,31 +35,24 @@ export interface ImageJob {
 export interface CourseImageDeps {
   db: ImageDb;
   createImage: (prompt: string) => Promise<Buffer>;
-  /** Absolute origin, e.g. https://demo.up.railway.app — no trailing slash. */
-  baseUrl: string;
+  /** How long to wait before returning; images still running keep attaching afterwards. */
   budgetMs?: number;
 }
 
-/** Origin used in stored image URLs. Production must configure one; local runs fall back to localhost. */
-export function publicBaseUrl(env: Record<string, string | undefined> = process.env): string | null {
-  const configured = (env.PUBLIC_BASE_URL || env.WEBHOOK_BASE_URL || '').replace(/\/+$/, '');
-  if (configured) return configured;
-  if (env.NODE_ENV === 'production') return null;
-  return `http://localhost:${env.PORT || 3001}`;
-}
-
-export const mediaUrl = (baseUrl: string, id: string) => `${baseUrl}/api/sync/media/${id}`;
+/** Relative path stored in the database; made absolute only when a bundle or message is built. */
+export const mediaPath = (id: string) => `/api/sync/media/${id}`;
 
 /**
  * Generates and stores every image in parallel, then points lessons.media_url and
- * courses.settings.coverImageUrl at them. Returns how many images were stored.
+ * courses.settings.coverImageUrl at them (as relative paths). Waits at most `budgetMs`;
+ * images that miss it keep running and attach later, so the caller must tolerate that.
  */
 export async function generateCourseImages(
   courseId: string,
   jobs: ImageJob[],
   deps: CourseImageDeps,
 ): Promise<{ stored: number; failed: number; bytes: number[] }> {
-  const { db, createImage, baseUrl } = deps;
+  const { db, createImage } = deps;
   const bytes: number[] = [];
 
   const run = async (job: ImageJob) => {
@@ -57,7 +62,7 @@ export async function generateCourseImages(
        VALUES ($1, $2, $3, 'image/jpeg', $4) RETURNING id`,
       [courseId, job.lessonId, job.kind, image],
     );
-    const url = mediaUrl(baseUrl, inserted.rows[0].id);
+    const url = mediaPath(inserted.rows[0].id);
     if (job.kind === 'cover') {
       await db.raw(
         `UPDATE courses SET settings = COALESCE(settings, '{}'::jsonb) || jsonb_build_object('coverImageUrl', $1::text)
@@ -87,7 +92,11 @@ export async function generateCourseImages(
   clearTimeout(timer);
 
   if (outcome === 'timeout') {
-    logger.warn(`Image generation budget exceeded for course ${courseId}; continuing without the rest`);
+    logger.warn(`Image budget exceeded for course ${courseId}; remaining images will attach in the background`);
+    settled.then((rs) => {
+      const ok = rs.filter((r) => r.status === 'fulfilled').length;
+      logger.info(`Late images for course ${courseId}: ${ok} of ${jobs.length} attached in total`);
+    });
     return { stored: bytes.length, failed: jobs.length - bytes.length, bytes };
   }
   const failed = outcome.filter((r) => r.status === 'rejected').length;

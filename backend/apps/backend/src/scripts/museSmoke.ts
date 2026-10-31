@@ -1,5 +1,5 @@
 /**
- * Muse Spark smoke test — one llmChat({provider:'meta'}) call.
+ * Muse smoke test — one llmChat({provider:'meta'}) call.
  *
  * Usage (MODEL_API_KEY, META_MODEL_API_BASE_URL, META_MODEL_ID exported in the shell):
  *   npx tsx src/scripts/museSmoke.ts
