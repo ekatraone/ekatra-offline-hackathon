@@ -703,4 +703,23 @@ class LessonsViewModelTest {
         vm.answer("B")
         assertEquals(setOf(lesson), vm.uiState.value.answeredLessonIds)
     }
+
+    @Test
+    fun `a downloaded image bumps the revision the screens key on`() = runTest {
+        newVm()
+        val before = vm.uiState.value.imageRevision
+
+        bundles.writeImage(bundles.coverFile(course), JPEG_BYTES)
+
+        assertEquals(before + 1, vm.uiState.value.imageRevision)
+        assertEquals(bundles.coverFile(course), vm.coverFile(course))
+        assertEquals(bundles.lessonImageFile(course, lesson), vm.lessonImageFile(course, lesson))
+    }
+
+    @Test
+    fun `the course the reader shows its cover for can be looked up`() = runTest {
+        bundles.save(sampleBundleWithImages(course, lesson))
+        newVm()
+        assertEquals(COVER_URL, vm.findCourse(course)?.coverImageUrl)
+    }
 }

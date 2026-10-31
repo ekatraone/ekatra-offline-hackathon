@@ -35,14 +35,45 @@ class LessonStore(private val dir: File) {
     @Synchronized
     fun delete(courseId: String) {
         fileFor(courseId).delete()
+        imageDir(courseId).deleteRecursively()
         _bundles.value = readAll()
     }
 
     /** Remove every stored bundle (account deletion). */
     @Synchronized
     fun clear() {
-        dir.listFiles()?.forEach { it.delete() }
+        // Bundles are files; each course's images live in a directory next to them.
+        dir.listFiles()?.forEach { it.deleteRecursively() }
         _bundles.value = emptyList()
+        _imageRevision.value += 1
+    }
+
+    // ---- images: <dir>/<courseId>/cover.jpg and <dir>/<courseId>/<lessonId>.jpg ----
+
+    private val _imageRevision = MutableStateFlow(0)
+    /** Bumps whenever an image file appears or goes, so the UI knows to decode again. */
+    val imageRevision: StateFlow<Int> = _imageRevision
+
+    fun coverFile(courseId: String): File = File(imageDir(courseId), "cover.jpg")
+
+    fun lessonImageFile(courseId: String, lessonId: String): File = File(imageDir(courseId), "${safe(lessonId)}.jpg")
+
+    /** Every image this bundle names: its local file and the URL to fetch it from (null = none). */
+    fun imageTargets(bundle: LessonBundle): List<Pair<File, String?>> =
+        listOf(coverFile(bundle.course.id) to bundle.course.coverImageUrl) +
+            bundle.lessons.filter { !it.isReview }.map { lessonImageFile(bundle.course.id, it.id) to it.imageUrl }
+
+    /** Write via a temp file and rename, so a half-downloaded image is never shown. */
+    @Synchronized
+    fun writeImage(target: File, bytes: ByteArray) {
+        target.parentFile?.mkdirs()
+        val tmp = File(target.parentFile, target.name + ".tmp")
+        tmp.writeBytes(bytes)
+        if (!tmp.renameTo(target)) {
+            target.delete()
+            check(tmp.renameTo(target)) { "Could not move ${tmp.name} into place" }
+        }
+        _imageRevision.value += 1
     }
 
     /** Newest first. Unreadable files are skipped, not fatal. */
@@ -54,7 +85,8 @@ class LessonStore(private val dir: File) {
                     .getOrNull()?.takeIf { it.course != null }
             }
 
-    // Course ids are UUIDs; strip anything else so an id can never escape the directory.
-    private fun fileFor(courseId: String) =
-        File(dir, courseId.filter { it.isLetterOrDigit() || it == '-' || it == '_' } + ".json")
+    // Ids are UUIDs; strip anything else so an id can never escape the directory.
+    private fun safe(id: String) = id.filter { it.isLetterOrDigit() || it == '-' || it == '_' }
+    private fun fileFor(courseId: String) = File(dir, safe(courseId) + ".json")
+    private fun imageDir(courseId: String) = File(dir, safe(courseId))
 }

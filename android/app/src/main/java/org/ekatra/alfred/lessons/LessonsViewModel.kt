@@ -70,6 +70,8 @@ data class LessonsUiState(
     val lessonTitles: Map<String, String> = emptyMap(),
     /** Lessons this learner has answered a question in on this device. */
     val answeredLessonIds: Set<String> = emptySet(),
+    /** Changes whenever a lesson image file is written, so the UI decodes it. */
+    val imageRevision: Int = 0,
     val screen: LessonsScreen = LessonsScreen.Home,
     val quiz: QuizState = QuizState(),
     val explain: ExplainState = ExplainState.Idle
@@ -116,6 +118,7 @@ class LessonsViewModel @Inject constructor(
 
     init {
         viewModelScope.launch { bundleStore.bundles.collect { b -> _ui.update { it.copy(bundles = b) } } }
+        viewModelScope.launch { bundleStore.imageRevision.collect { r -> _ui.update { it.copy(imageRevision = r) } } }
         viewModelScope.launch {
             progress.state.collect { p ->
                 _ui.update {
@@ -130,7 +133,7 @@ class LessonsViewModel @Inject constructor(
             }
         }
         viewModelScope.launch {
-            manager.pendingCount.collect { n ->
+            manager.pendingEventCount.collect { n ->
                 _ui.update { it.copy(pendingCount = n) }
                 refreshPendingTopics()
             }
@@ -221,6 +224,12 @@ class LessonsViewModel @Inject constructor(
     }
 
     // ---- reading and quiz ----
+
+    fun coverFile(courseId: String) = bundleStore.coverFile(courseId)
+
+    fun lessonImageFile(courseId: String, lessonId: String) = bundleStore.lessonImageFile(courseId, lessonId)
+
+    fun findCourse(courseId: String): BundleCourse? = bundleStore.get(courseId)?.course
 
     fun findLesson(courseId: String, lessonId: String): BundleLesson? =
         bundleStore.get(courseId)?.lessons?.firstOrNull { it.id == lessonId }

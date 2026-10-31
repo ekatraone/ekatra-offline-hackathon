@@ -52,12 +52,18 @@ class FakeApi : LearnerSyncApi {
     }
     var meResult: () -> ApiResult<MeResponse> = { ApiResult.Ok(MeResponse()) }
 
+    var imageResult: (String) -> ApiResult<ByteArray> = { ApiResult.Ok(JPEG_BYTES) }
+    val imageCalls = mutableListOf<String>()
+    /** When set, requestLesson waits on it: a lesson that is still being generated. */
+    var lessonGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+
     val lessonCalls = mutableListOf<Triple<String, String, String>>()
     val eventBatches = mutableListOf<List<LearnerEvent>>() // one entry per POST
     var meCalls = 0
 
     override suspend fun requestLesson(topic: String, language: String, clientRequestId: String): ApiResult<RequestLessonResult> {
         lessonCalls += Triple(topic, language, clientRequestId)
+        lessonGate?.await()
         return lessonResult(topic, language, clientRequestId)
     }
     override suspend fun fetchBundle(courseId: String) = bundleResult(courseId)
@@ -66,6 +72,7 @@ class FakeApi : LearnerSyncApi {
         return eventsResult(events)
     }
     override suspend fun getMe(): ApiResult<MeResponse> { meCalls++; return meResult() }
+    override suspend fun downloadImage(url: String): ApiResult<ByteArray> { imageCalls += url; return imageResult(url) }
 }
 
 fun sampleBundle(courseId: String = "course-1", lessonId: String = "lesson-1") = LessonBundle(
@@ -120,4 +127,20 @@ class FakeTrigger : SyncTrigger {
 class CountingDispatcher : kotlinx.coroutines.CoroutineDispatcher() {
     var dispatched = 0
     override fun dispatch(context: kotlin.coroutines.CoroutineContext, block: Runnable) { dispatched++; block.run() }
+}
+
+/** Starts with the JPEG magic bytes, which is all the client checks. */
+val JPEG_BYTES = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte(), 1, 2, 3, 4)
+
+const val COVER_URL = "https://demo.example/api/sync/media/cover-1"
+const val LESSON_IMAGE_URL = "https://demo.example/api/sync/media/lesson-img-1"
+
+/** A bundle with a cover, one module image, and a review lesson (which never has an image). */
+fun sampleBundleWithImages(courseId: String = "course-1", lessonId: String = "lesson-1"): LessonBundle {
+    val b = sampleBundle(courseId, lessonId)
+    val review = b.lessons.single().copy(id = "review-$lessonId", kind = "review", content = "", order = 4, imageUrl = "https://demo.example/never")
+    return b.copy(
+        course = b.course.copy(coverImageUrl = COVER_URL),
+        lessons = b.lessons.map { it.copy(imageUrl = LESSON_IMAGE_URL) } + review
+    )
 }

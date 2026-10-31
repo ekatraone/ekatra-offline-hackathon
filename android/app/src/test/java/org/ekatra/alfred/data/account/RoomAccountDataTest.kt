@@ -86,6 +86,19 @@ class RoomAccountDataTest {
     }
 
     @Test
+    fun `downloaded lesson images are wiped with the bundles`() = runBlocking {
+        lessons.save(org.ekatra.alfred.lessons.sampleBundleWithImages("c1", "l1"))
+        lessons.writeImage(lessons.coverFile("c1"), org.ekatra.alfred.lessons.JPEG_BYTES)
+        lessons.writeImage(lessons.lessonImageFile("c1", "l1"), org.ekatra.alfred.lessons.JPEG_BYTES)
+        assertTrue(File(dir, "lessons/c1/cover.jpg").exists())
+
+        data.clear("uid1")
+
+        assertFalse(File(dir, "lessons/c1").exists())
+        assertEquals(0, File(dir, "lessons").listFiles()?.size ?: 0)
+    }
+
+    @Test
     fun `a restart after deletion finds nothing`() = runBlocking {
         lessons.save(sampleBundle())
         progress.markCompleted("lesson-1")

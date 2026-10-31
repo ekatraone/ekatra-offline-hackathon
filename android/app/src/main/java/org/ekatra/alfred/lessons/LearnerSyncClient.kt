@@ -30,6 +30,8 @@ class LearnerSyncClient internal constructor(
         /** Muse Spark takes 60-240 s to write a lesson and the server gives up at 240 s; wait 300 s so we never quit first. */
         const val LESSON_READ_TIMEOUT_MS = 300_000
         const val EVENT_BATCH_LIMIT = 20
+        /** Lesson images are about 150-300 KB; refuse anything absurd rather than fill memory. */
+        const val MAX_IMAGE_BYTES = 5 * 1024 * 1024
     }
 
     private val gson = Gson()
@@ -48,6 +50,52 @@ class LearnerSyncClient internal constructor(
 
     override suspend fun getMe() =
         call("GET", "/api/sync/me", READ_TIMEOUT_MS, null, MeResponse::class.java)
+
+    override suspend fun downloadImage(url: String): ApiResult<ByteArray> = withContext(Dispatchers.IO) {
+        val parsed = runCatching { URL(url) }.getOrNull()
+        if (parsed == null || parsed.protocol !in setOf("http", "https")) {
+            return@withContext ApiResult.Rejected(0, "Not an http(s) image URL")
+        }
+        var conn: HttpURLConnection? = null
+        try {
+            conn = openConnection(parsed).apply {
+                requestMethod = "GET"
+                connectTimeout = CONNECT_TIMEOUT_MS
+                readTimeout = READ_TIMEOUT_MS
+                setRequestProperty("Accept", "image/jpeg")
+            }
+            val code = conn.responseCode
+            when {
+                code in 200..299 -> {
+                    val bytes = conn.inputStream.use { readCapped(it, MAX_IMAGE_BYTES) }
+                        ?: return@withContext ApiResult.Rejected(413, "Image is larger than $MAX_IMAGE_BYTES bytes")
+                    // Anything that is not a JPEG (an HTML error page from a proxy, say) is not an image.
+                    if (bytes.size < 4 || bytes[0] != 0xFF.toByte() || bytes[1] != 0xD8.toByte()) {
+                        ApiResult.Rejected(415, "Not a JPEG")
+                    } else ApiResult.Ok(bytes)
+                }
+                code == 429 || code == 408 || code >= 500 -> ApiResult.Retryable("HTTP $code")
+                else -> ApiResult.Rejected(code, "HTTP $code")
+            }
+        } catch (e: IOException) {
+            ApiResult.Retryable(e.message ?: e.javaClass.simpleName)
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
+    /** @return the bytes, or null if the stream is longer than [max]. */
+    private fun readCapped(input: java.io.InputStream, max: Int): ByteArray? {
+        val out = java.io.ByteArrayOutputStream()
+        val buf = ByteArray(8 * 1024)
+        while (true) {
+            val n = input.read(buf)
+            if (n < 0) break
+            if (out.size() + n > max) return null
+            out.write(buf, 0, n)
+        }
+        return out.toByteArray()
+    }
 
     private suspend fun <T> call(
         method: String,
@@ -99,6 +147,9 @@ class LearnerSyncClient internal constructor(
             }
             code == 401 -> ApiResult.Unauthorized(error)
             code == 429 || code >= 500 -> ApiResult.Retryable(error)
+            // A 4xx is a real answer from our API only if it carries a {success:false} envelope. A bare
+            // 404 or 400 page (a proxy during a redeploy, say) says nothing about the request itself.
+            root?.get("success")?.takeIf { it.isJsonPrimitive }?.asBoolean != false -> ApiResult.Retryable("HTTP $code (not an API response)")
             else -> ApiResult.Rejected(code, error)
         }
     }

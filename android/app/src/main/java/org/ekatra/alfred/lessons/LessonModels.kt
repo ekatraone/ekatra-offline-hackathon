@@ -11,7 +11,9 @@ data class BundleCourse(
     val title: String,
     val description: String? = null,
     val language: String? = null,
-    val generator: Generator? = null
+    val generator: Generator? = null,
+    /** Optional absolute URL (public, no auth) of the cover image; null or absent on older bundles. */
+    val coverImageUrl: String? = null
 )
 
 data class BundleQuestion(
@@ -31,7 +33,9 @@ data class BundleLesson(
     val content: String? = null,
     val day: Int = 1,
     val order: Int = 0,
-    val questions: List<BundleQuestion> = emptyList()
+    val questions: List<BundleQuestion> = emptyList(),
+    /** Optional absolute URL of this module's illustration; null or absent on older bundles and on reviews. */
+    val imageUrl: String? = null
 ) {
     val isReview: Boolean get() = kind == "review"
 }

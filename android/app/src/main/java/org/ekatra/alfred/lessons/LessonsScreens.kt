@@ -16,6 +16,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -43,7 +44,7 @@ fun LessonsApp(onExit: () -> Unit, vm: LessonsViewModel = hiltViewModel()) {
                 is LessonsScreen.Lesson -> {
                     val lesson = vm.findLesson(screen.courseId, screen.lessonId)
                     if (lesson == null) HomeFallback(vm) else when (screen.stage) {
-                        Stage.READ -> ReadScreen(lesson, onStartQuiz = vm::startQuiz)
+                        Stage.READ -> ReadScreen(lesson, screen.courseId, ui.imageRevision, vm, onStartQuiz = vm::startQuiz)
                         Stage.QUIZ -> QuizScreen(ui, lesson, vm)
                         Stage.DONE -> DoneScreen(ui, lesson, vm)
                     }
@@ -200,6 +201,13 @@ private fun CourseCard(bundle: LessonBundle, ui: LessonsUiState, vm: LessonsView
     val done = lessons.count { it.id in ui.completed }
     Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            LessonImage(
+                file = vm.coverFile(bundle.course.id),
+                expected = !bundle.course.coverImageUrl.isNullOrBlank(),
+                contentDescription = "Cover illustration for ${bundle.course.title}",
+                revision = ui.imageRevision,
+                modifier = Modifier.fillMaxWidth().height(140.dp).clip(RoundedCornerShape(12.dp))
+            )
             Text(bundle.course.title, fontWeight = FontWeight.Bold, fontSize = 17.sp)
             bundle.course.description?.takeIf { it.isNotBlank() }?.let { Text(it, fontSize = 13.sp, color = Color(0xFF475569)) }
             bundle.course.generator?.let { g ->
@@ -245,9 +253,26 @@ internal fun lessonText(raw: String): AnnotatedString = buildAnnotatedString {
 }
 
 @Composable
-private fun ReadScreen(lesson: BundleLesson, onStartQuiz: () -> Unit) {
+private fun ReadScreen(lesson: BundleLesson, courseId: String, imageRevision: Int, vm: LessonsViewModel, onStartQuiz: () -> Unit) {
+    val course = vm.findCourse(courseId)
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp).navigationBarsPadding(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        if (course != null) {
+            LessonImage(
+                file = vm.coverFile(courseId),
+                expected = !course.coverImageUrl.isNullOrBlank(),
+                contentDescription = "Cover illustration for ${course.title}",
+                revision = imageRevision,
+                modifier = Modifier.fillMaxWidth().height(110.dp).clip(RoundedCornerShape(12.dp))
+            )
+        }
         Text(lesson.title, fontWeight = FontWeight.Bold, fontSize = 22.sp)
+        LessonImage(
+            file = vm.lessonImageFile(courseId, lesson.id),
+            expected = !lesson.imageUrl.isNullOrBlank(),
+            contentDescription = "Illustration for ${lesson.title}",
+            revision = imageRevision,
+            modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(12.dp))
+        )
         Text(lessonText(lesson.content.orEmpty()), fontSize = 17.sp, lineHeight = 26.sp)
         if (lesson.questions.isNotEmpty()) {
             Button(onClick = onStartQuiz, modifier = Modifier.fillMaxWidth()) {
