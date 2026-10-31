@@ -46,7 +46,8 @@ export function getFirebaseAuth(): FirebaseAuthLike | null {
       admin.initializeApp({ credential: admin.credential.cert(parseServiceAccount(raw) as admin.ServiceAccount) }, APP_NAME);
     cached = admin.auth(app);
   } catch (err: any) {
-    logger.error(`FIREBASE_SERVICE_ACCOUNT is set but unusable: ${err?.message}`);
+    // Fixed text plus the error class only: the message can quote part of the credential.
+    logger.error('FIREBASE_SERVICE_ACCOUNT is set but could not be used', { errorClass: err?.constructor?.name ?? 'Error' });
     cached = null;
   }
   return cached;

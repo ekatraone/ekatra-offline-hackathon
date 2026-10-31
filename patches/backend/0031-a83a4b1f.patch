@@ -1,0 +1,20 @@
+diff --git a/apps/backend/src/index.ts b/apps/backend/src/index.ts
+index 5b1a79e4..c9e63788 100644
+--- a/apps/backend/src/index.ts
++++ b/apps/backend/src/index.ts
+@@ -60,6 +60,7 @@ import { usersRouter } from './routes/users.js';
+ import { fsmRouter } from './routes/fsm.js';
+ import { createDefaultSyncRouter } from './routes/sync.js';
+ import { createDefaultWhatsappAuthRouter } from './routes/authWhatsapp.js';
++import { logProxyChainOnce } from './lib/proxyDiagnostics.js';
+ import { authMiddleware } from './middleware/auth.js';
+ 
+ // Logger
+@@ -72,6 +73,7 @@ const PORT = process.env.PORT || 3001;
+ // Behind Railway's proxy every request shares the proxy's address; trust one hop so the
+ // per-IP rate limiters (global and media) see the real client from X-Forwarded-For.
+ app.set('trust proxy', 1);
++app.use(logProxyChainOnce()); // once: confirms the proxy chain is one hop (addresses truncated)
+ app.use(helmet());
+ app.use(cors({
+   origin: process.env.FRONTEND_URL || 'http://localhost:3000',
