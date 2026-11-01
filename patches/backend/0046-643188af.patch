@@ -1,0 +1,676 @@
+diff --git a/apps/backend/src/middleware/__tests__/auth.test.ts b/apps/backend/src/middleware/__tests__/auth.test.ts
+index 72370027..ef088e40 100644
+--- a/apps/backend/src/middleware/__tests__/auth.test.ts
++++ b/apps/backend/src/middleware/__tests__/auth.test.ts
+@@ -1,7 +1,7 @@
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+ import jwt from 'jsonwebtoken';
+-import { signToken, verifyAdminToken } from '../auth.js';
++import { requireRole, signToken, verifyAdminToken } from '../auth.js';
+ 
+ process.env.JWT_SECRET = 'test-only-secret-not-for-production';
+ const admin = { userId: 'admin-1', email: 'admin@example.test', role: 'admin', organizationId: 'org-1' };
+@@ -24,3 +24,22 @@ test('expired, unsigned, wrong-algorithm and non-expiring tokens are rejected',
+   assert.throws(() => verifyAdminToken(jwt.sign(admin, process.env.JWT_SECRET!)));
+   assert.throws(() => verifyAdminToken(jwt.sign(admin, '', { algorithm: 'none' })));
+ });
++
++test('super-admin-only operations reject ordinary admins', () => {
++  const middleware = requireRole('super_admin');
++  let statusCode = 0;
++  let nextCalled = false;
++  const response = {
++    status(code: number) { statusCode = code; return this; },
++    json() { return this; },
++  };
++
++  middleware({ auth: admin } as any, response as any, () => { nextCalled = true; });
++  assert.equal(statusCode, 403);
++  assert.equal(nextCalled, false);
++
++  statusCode = 0;
++  middleware({ auth: { ...admin, role: 'super_admin' } } as any, response as any, () => { nextCalled = true; });
++  assert.equal(statusCode, 0);
++  assert.equal(nextCalled, true);
++});
+diff --git a/apps/backend/src/routes/admin.ts b/apps/backend/src/routes/admin.ts
+index 4c77be73..d7653258 100644
+--- a/apps/backend/src/routes/admin.ts
++++ b/apps/backend/src/routes/admin.ts
+@@ -7,11 +7,44 @@
+ 
+ import { Router, Request, Response } from 'express';
+ import { logger } from '../lib/logger.js';
++import { requireRole } from '../middleware/auth.js';
+ 
+ const getDb = () => import('@ekatra/database').then(m => m.db);
+ const getFSM = () => import('../flows/conversationFSM.js').then(m => m.ConversationFSM);
+ 
+ export const adminRouter: Router = Router();
++adminRouter.use(requireRole('admin', 'super_admin'));
++
++// Delivery recovery is cross-tenant operational data, so only a super-admin
++// may inspect or replay it. Payloads are deliberately excluded from responses.
++adminRouter.get('/webhook-receipts/failed', requireRole('super_admin'), async (req: Request, res: Response) => {
++  try {
++    const parsedLimit = Number.parseInt(String(req.query.limit ?? '50'), 10);
++    const limit = Number.isFinite(parsedLimit) ? parsedLimit : 50;
++    const db = await getDb();
++    const receipts = await db.webhookReceipts.findFailed(limit);
++    res.json({ success: true, data: receipts });
++  } catch (error) {
++    logger.error('Admin: failed to list webhook receipts:', error);
++    res.status(500).json({ success: false, error: 'Failed to list webhook receipts' });
++  }
++});
++
++adminRouter.post('/webhook-receipts/:id/replay', requireRole('super_admin'), async (req: Request, res: Response) => {
++  try {
++    const db = await getDb();
++    const receipt = await db.webhookReceipts.requestReplay(req.params.id, req.auth!.userId);
++    if (!receipt) {
++      res.status(409).json({ success: false, error: 'Receipt is not failed or does not exist' });
++      return;
++    }
++    logger.warn(`Admin ${req.auth!.userId} requested webhook receipt replay ${receipt.id}`);
++    res.json({ success: true, data: receipt });
++  } catch (error) {
++    logger.error('Admin: failed to request webhook replay:', error);
++    res.status(500).json({ success: false, error: 'Failed to request webhook replay' });
++  }
++});
+ 
+ // ─── GET /api/admin/learners/:id/state ────────────────────────────────────────
+ // Return the current FSM state + metadata for a learner (by ID or phone).
+@@ -23,8 +56,8 @@ adminRouter.get('/learners/:id/state', async (req: Request, res: Response) => {
+ 
+     // Accept phone number or UUID
+     const learner = id.match(/^\d+$/)
+-      ? await db.learners.findByPhone(id)
+-      : await db.learners.findById(id);
++      ? await db.learners.findByPhone(id, req.auth!.organizationId)
++      : await db.learners.findById(id, req.auth!.organizationId);
+ 
+     if (!learner) {
+       res.status(404).json({ success: false, error: 'Learner not found' });
+@@ -59,8 +92,8 @@ adminRouter.post('/learners/:id/reset', async (req: Request, res: Response) => {
+     const { deleteHistory = false } = req.body as { deleteHistory?: boolean };
+ 
+     const learner = id.match(/^\d+$/)
+-      ? await db.learners.findByPhone(id)
+-      : await db.learners.findById(id);
++      ? await db.learners.findByPhone(id, req.auth!.organizationId)
++      : await db.learners.findById(id, req.auth!.organizationId);
+ 
+     if (!learner) {
+       res.status(404).json({ success: false, error: 'Learner not found' });
+@@ -120,8 +153,8 @@ adminRouter.post('/learners/:id/send', async (req: Request, res: Response) => {
+     }
+ 
+     const learner = id.match(/^\d+$/)
+-      ? await db.learners.findByPhone(id)
+-      : await db.learners.findById(id);
++      ? await db.learners.findByPhone(id, req.auth!.organizationId)
++      : await db.learners.findById(id, req.auth!.organizationId);
+ 
+     if (!learner) {
+       res.status(404).json({ success: false, error: 'Learner not found' });
+@@ -144,7 +177,7 @@ adminRouter.post('/learners/:id/send', async (req: Request, res: Response) => {
+ // bypassing Twilio signature validation. Useful for manual testing and CI.
+ // Body: { phone: string, text?: string, buttonPayload?: string, profileName?: string }
+ 
+-adminRouter.post('/simulate', async (req: Request, res: Response) => {
++adminRouter.post('/simulate', requireRole('super_admin'), async (req: Request, res: Response) => {
+   try {
+     const { phone, text, buttonPayload, profileName = 'Simulated User' } = req.body;
+ 
+diff --git a/apps/backend/src/routes/analytics.ts b/apps/backend/src/routes/analytics.ts
+index 26d2aae7..7089d7de 100644
+--- a/apps/backend/src/routes/analytics.ts
++++ b/apps/backend/src/routes/analytics.ts
+@@ -5,14 +5,14 @@ const getDb = () => import('@ekatra/database').then(m => m.db);
+ 
+ export const analyticsRouter: Router = Router();
+ 
+-analyticsRouter.get('/stats', async (_req: Request, res: Response) => {
++analyticsRouter.get('/stats', async (req: Request, res: Response) => {
+   try {
+     const db = await getDb();
+     const [learnerStats, courseStats, messageStats, enrollmentStats] = await Promise.all([
+-      db.learners.getStats(),
+-      db.courses.getStats(),
+-      db.messageLog.getStats(),
+-      db.enrollments.getStats(),
++      db.learners.getStats(req.auth!.organizationId),
++      db.courses.getStats(req.auth!.organizationId),
++      db.messageLog.getStats(req.auth!.organizationId),
++      db.enrollments.getStats(undefined, req.auth!.organizationId),
+     ]);
+ 
+     const totalEnrollments = Number(enrollmentStats.total || 0);
+@@ -39,10 +39,10 @@ analyticsRouter.get('/analytics', async (req: Request, res: Response) => {
+     const days = Math.max(7, Math.min(90, Number(req.query.days || 30)));
+ 
+     const [dailyMessages, dailyRegistrations, deliveryStats, completionBreakdown] = await Promise.all([
+-      db.messageLog.getDailyVolume(days),
+-      db.learners.getDailyRegistrations(days),
+-      db.messageLog.getDeliveryStats(),
+-      db.enrollments.getCompletionBreakdown(),
++      db.messageLog.getDailyVolume(days, req.auth!.organizationId),
++      db.learners.getDailyRegistrations(days, req.auth!.organizationId),
++      db.messageLog.getDeliveryStats(req.auth!.organizationId),
++      db.enrollments.getCompletionBreakdown(req.auth!.organizationId),
+     ]);
+ 
+     const registrationsByLabel = new Map(
+@@ -90,10 +90,10 @@ analyticsRouter.get('/analytics', async (req: Request, res: Response) => {
+   }
+ });
+ 
+-analyticsRouter.get('/courses/stats', async (_req: Request, res: Response) => {
++analyticsRouter.get('/courses/stats', async (req: Request, res: Response) => {
+   try {
+     const db = await getDb();
+-    const data = await db.courses.getPerformanceStats();
++    const data = await db.courses.getPerformanceStats(req.auth!.organizationId);
+ 
+     res.json({ success: true, data });
+   } catch (error) {
+@@ -102,4 +102,4 @@ analyticsRouter.get('/courses/stats', async (_req: Request, res: Response) => {
+   }
+ });
+ 
+-export default analyticsRouter;
+\ No newline at end of file
++export default analyticsRouter;
+diff --git a/apps/backend/src/routes/certificates.ts b/apps/backend/src/routes/certificates.ts
+index 03a46161..83981ace 100644
+--- a/apps/backend/src/routes/certificates.ts
++++ b/apps/backend/src/routes/certificates.ts
+@@ -1,4 +1,5 @@
+ import { Router, Request, Response } from 'express';
++import { matchesCertificateAccessToken } from '@ekatra/delivery/certificates';
+ 
+ const getDb = () => import('@ekatra/database').then(m => m.db);
+ 
+@@ -8,7 +9,8 @@ export const certificatesRouter: Router = Router();
+  * GET /api/certificates/:learnerId
+  *
+  * Streams the learner's certificate PDF.
+- * Public endpoint — no auth required (learner shares the URL via WhatsApp).
++ * Capability URL — the certificate link contains an unguessable token that is
++ * replaced when the certificate is regenerated.
+  */
+ certificatesRouter.get('/:learnerId', async (req: Request, res: Response) => {
+   try {
+@@ -21,8 +23,11 @@ certificatesRouter.get('/:learnerId', async (req: Request, res: Response) => {
+     }
+ 
+     const base64 = learner.metadata?.certificateBase64;
+-    if (!base64) {
+-      res.status(404).json({ error: 'Certificate not yet generated' });
++    const expectedToken = learner.metadata?.certificateAccessToken;
++    const suppliedToken = typeof req.query.token === 'string' ? req.query.token : '';
++    const tokenMatches = matchesCertificateAccessToken(suppliedToken, expectedToken);
++    if (!base64 || !tokenMatches) {
++      res.status(404).json({ error: 'Certificate not found' });
+       return;
+     }
+ 
+diff --git a/apps/backend/src/routes/courses.ts b/apps/backend/src/routes/courses.ts
+index 9a29ea5d..58b00e99 100644
+--- a/apps/backend/src/routes/courses.ts
++++ b/apps/backend/src/routes/courses.ts
+@@ -6,6 +6,7 @@
+ 
+ import { Router, Request, Response } from 'express';
+ import { logger } from '../lib/logger.js';
++import { requireRole } from '../middleware/auth.js';
+ 
+ // Lazy import to avoid circular dependencies
+ const getDb = () => import('@ekatra/database').then(m => m.db);
+@@ -19,14 +20,15 @@ export const coursesRouter: Router = Router();
+ coursesRouter.get('/', async (req: Request, res: Response) => {
+   try {
+     const db = await getDb();
+-    const { organizationId, status, search, page = 1, limit = 20 } = req.query;
++    const { status, search, page = 1, limit = 20 } = req.query;
+     
+     const courses = await db.courses.findAll({
+-      organizationId: organizationId as string,
++      organizationId: req.auth!.organizationId,
+       status: status as string,
+       search: search as string,
+-      page: Number(page),
+-      limit: Number(limit)
++      page: Math.max(1, Number(page) || 1),
++      // Clamp: the value goes straight into SQL LIMIT; clients page for more (max 100 rows/page).
++      limit: Math.min(100, Math.max(1, Number(limit) || 20))
+     });
+ 
+     res.json({
+@@ -49,7 +51,7 @@ coursesRouter.get('/:id', async (req: Request, res: Response) => {
+     const db = await getDb();
+     const { id } = req.params;
+     
+-    const course = await db.courses.findById(id);
++    const course = await db.courses.findById(id, req.auth!.organizationId);
+     if (!course) {
+       return res.status(404).json({ success: false, error: 'Course not found' });
+     }
+@@ -77,7 +79,7 @@ coursesRouter.get('/:id', async (req: Request, res: Response) => {
+ coursesRouter.post('/', async (req: Request, res: Response) => {
+   try {
+     const db = await getDb();
+-    const { organizationId, title, description, category, status, createdBy } = req.body;
++    const { title, description, category, status } = req.body;
+ 
+     if (!title) {
+       return res.status(400).json({ 
+@@ -86,20 +88,13 @@ coursesRouter.post('/', async (req: Request, res: Response) => {
+       });
+     }
+ 
+-    // Get default organization if not provided
+-    let orgId = organizationId;
+-    if (!orgId) {
+-      const org = await db.organizations.getDefault();
+-      orgId = org?.id;
+-    }
+-
+     const course = await db.courses.create({
+-      organizationId: orgId,
++      organizationId: req.auth!.organizationId,
+       title,
+       description,
+       category,
+       status: status || 'draft',
+-      createdBy
++      createdBy: req.auth!.userId,
+     });
+ 
+     logger.info(`Course created: ${course.id}`);
+@@ -116,10 +111,14 @@ coursesRouter.post('/', async (req: Request, res: Response) => {
+  * capabilities) and send it with the lesson text to a learner address.
+  * Body: { to } — e.g. "tg:<chat_id>" (Telegram) — media buffers are Telegram-only today.
+  */
+-coursesRouter.post('/lessons/:lessonId/send-media', async (req: Request, res: Response) => {
++coursesRouter.post('/lessons/:lessonId/send-media', requireRole('super_admin'), async (req: Request, res: Response) => {
+   try {
++    const db = await getDb();
+     const { to } = req.body;
+     if (!to) return res.status(400).json({ success: false, error: 'Missing "to" (learner address)' });
++    const lesson = await db.lessons.findById(req.params.lessonId);
++    const course = lesson ? await db.courses.findById(lesson.course_id, req.auth!.organizationId) : null;
++    if (!lesson || !course) return res.status(404).json({ success: false, error: 'Lesson not found' });
+     const { sendLessonWithMedia } = await import('../services/lessonMedia.js');
+     const result = await sendLessonWithMedia(req.params.lessonId, to);
+     res.json({ success: true, data: result });
+@@ -143,16 +142,7 @@ coursesRouter.post('/generate', async (req: Request, res: Response) => {
+       return res.status(400).json({ success: false, error: 'topic is required (min 2 characters)' });
+     }
+ 
+-    // Resolve organization
+-    const { organizationId: orgFromBody } = req.body;
+-    let organizationId: string | undefined = orgFromBody;
+-    if (!organizationId) {
+-      const org = await db.organizations.getDefault();
+-      organizationId = org?.id;
+-    }
+-    if (!organizationId) {
+-      return res.status(500).json({ success: false, error: 'No organization configured' });
+-    }
++    const organizationId = req.auth!.organizationId;
+ 
+     const { courseGenerator } = await import('../services/courseGenerator.js');
+ 
+@@ -196,6 +186,13 @@ coursesRouter.put('/:id', async (req: Request, res: Response) => {
+     const { id } = req.params;
+     const { title, description, category, status, settings, fsm_definition_id } = req.body;
+ 
++    if (fsm_definition_id) {
++      const definition = await db.fsmDefinitions.findById(fsm_definition_id);
++      if (!definition || definition.organization_id !== req.auth!.organizationId) {
++        return res.status(404).json({ success: false, error: 'FSM definition not found' });
++      }
++    }
++
+     const course = await db.courses.update(id, {
+       title,
+       description,
+@@ -203,7 +200,7 @@ coursesRouter.put('/:id', async (req: Request, res: Response) => {
+       status,
+       settings,
+       fsm_definition_id
+-    });
++    }, req.auth!.organizationId);
+ 
+     if (!course) {
+       return res.status(404).json({ success: false, error: 'Course not found' });
+@@ -226,7 +223,9 @@ coursesRouter.delete('/:id', async (req: Request, res: Response) => {
+     const db = await getDb();
+     const { id } = req.params;
+ 
+-    await db.courses.delete(id);
++    const course = await db.courses.findById(id, req.auth!.organizationId);
++    if (!course) return res.status(404).json({ success: false, error: 'Course not found' });
++    await db.courses.delete(id, req.auth!.organizationId);
+     logger.info(`Course deleted: ${id}`);
+     
+     res.json({ success: true });
+@@ -245,7 +244,7 @@ coursesRouter.post('/:id/publish', async (req: Request, res: Response) => {
+     const db = await getDb();
+     const { id } = req.params;
+ 
+-    const course = await db.courses.update(id, { status: 'published' });
++    const course = await db.courses.update(id, { status: 'published' }, req.auth!.organizationId);
+     if (!course) {
+       return res.status(404).json({ success: false, error: 'Course not found' });
+     }
+@@ -267,7 +266,7 @@ coursesRouter.post('/:id/unpublish', async (req: Request, res: Response) => {
+     const db = await getDb();
+     const { id } = req.params;
+ 
+-    const course = await db.courses.update(id, { status: 'draft' });
++    const course = await db.courses.update(id, { status: 'draft' }, req.auth!.organizationId);
+     if (!course) {
+       return res.status(404).json({ success: false, error: 'Course not found' });
+     }
+@@ -290,7 +289,7 @@ coursesRouter.post('/:id/duplicate', async (req: Request, res: Response) => {
+     const { id } = req.params;
+     const { newTitle } = req.body;
+ 
+-    const originalCourse = await db.courses.findById(id);
++    const originalCourse = await db.courses.findById(id, req.auth!.organizationId);
+     if (!originalCourse) {
+       return res.status(404).json({ success: false, error: 'Course not found' });
+     }
+@@ -337,6 +336,9 @@ coursesRouter.get('/:id/lessons', async (req: Request, res: Response) => {
+     const db = await getDb();
+     const { id } = req.params;
+ 
++    const course = await db.courses.findById(id, req.auth!.organizationId);
++    if (!course) return res.status(404).json({ success: false, error: 'Course not found' });
++
+     const lessons = await db.lessons.findByCourse(id);
+     res.json({ success: true, data: lessons });
+   } catch (error) {
+@@ -355,6 +357,9 @@ coursesRouter.post('/:id/lessons', async (req: Request, res: Response) => {
+     const { id } = req.params;
+     const { title, content, contentType, mediaUrl, sequenceOrder, durationMinutes, dayNumber, metadata } = req.body;
+ 
++    const course = await db.courses.findById(id, req.auth!.organizationId);
++    if (!course) return res.status(404).json({ success: false, error: 'Course not found' });
++
+     if (!title) {
+       return res.status(400).json({ success: false, error: 'Title is required' });
+     }
+@@ -393,9 +398,12 @@ coursesRouter.post('/:id/lessons', async (req: Request, res: Response) => {
+ coursesRouter.put('/:courseId/lessons/:lessonId', async (req: Request, res: Response) => {
+   try {
+     const db = await getDb();
+-    const { lessonId } = req.params;
++    const { courseId, lessonId } = req.params;
+     const { title, content, contentType, mediaUrl, sequenceOrder, durationMinutes, dayNumber, metadata } = req.body;
+ 
++    const course = await db.courses.findById(courseId, req.auth!.organizationId);
++    if (!course) return res.status(404).json({ success: false, error: 'Course not found' });
++
+     const lesson = await db.lessons.update(lessonId, {
+       title,
+       content,
+@@ -405,7 +413,7 @@ coursesRouter.put('/:courseId/lessons/:lessonId', async (req: Request, res: Resp
+       durationMinutes,
+       dayNumber,
+       metadata
+-    });
++    }, courseId);
+ 
+     if (!lesson) {
+       return res.status(404).json({ success: false, error: 'Lesson not found' });
+@@ -426,9 +434,13 @@ coursesRouter.put('/:courseId/lessons/:lessonId', async (req: Request, res: Resp
+ coursesRouter.delete('/:courseId/lessons/:lessonId', async (req: Request, res: Response) => {
+   try {
+     const db = await getDb();
+-    const { lessonId } = req.params;
++    const { courseId, lessonId } = req.params;
+ 
+-    await db.lessons.delete(lessonId);
++    const course = await db.courses.findById(courseId, req.auth!.organizationId);
++    if (!course) return res.status(404).json({ success: false, error: 'Course not found' });
++    const lesson = await db.lessons.findById(lessonId);
++    if (!lesson || lesson.course_id !== courseId) return res.status(404).json({ success: false, error: 'Lesson not found' });
++    await db.lessons.delete(lessonId, courseId);
+     logger.info(`Lesson deleted: ${lessonId}`);
+     
+     res.json({ success: true });
+@@ -447,6 +459,9 @@ coursesRouter.get('/:id/stats', async (req: Request, res: Response) => {
+     const db = await getDb();
+     const { id } = req.params;
+ 
++    const course = await db.courses.findById(id, req.auth!.organizationId);
++    if (!course) return res.status(404).json({ success: false, error: 'Course not found' });
++
+     const enrollmentStats = await db.enrollments.getStats(id);
+     const lessonCount = await db.lessons.countByCourse(id);
+ 
+diff --git a/apps/backend/src/routes/schedules.ts b/apps/backend/src/routes/schedules.ts
+index 702b614a..89691089 100644
+--- a/apps/backend/src/routes/schedules.ts
++++ b/apps/backend/src/routes/schedules.ts
+@@ -22,7 +22,7 @@ schedulesRouter.get('/', async (req: Request, res: Response) => {
+     const db = await getDb();
+     const { courseId } = req.query;
+     
+-    const schedules = await db.schedules.findAll(courseId as string);
++    const schedules = await db.schedules.findAll(courseId as string, req.auth!.organizationId);
+     res.json({ success: true, data: schedules });
+   } catch (error) {
+     logger.error('Error fetching schedules:', error);
+@@ -44,8 +44,12 @@ schedulesRouter.get('/logs', async (req: Request, res: Response) => {
+     // schedule_execution_logs table may not exist yet — return empty list gracefully
+     try {
+       const result = await db.raw(
+-        `SELECT * FROM schedule_execution_logs ORDER BY executed_at DESC LIMIT $1 OFFSET $2`,
+-        [limit, offset]
++        `SELECT logs.* FROM schedule_execution_logs logs
++         JOIN schedules s ON s.id = logs.schedule_id
++         JOIN courses c ON c.id = s.course_id
++         WHERE c.organization_id = $1
++         ORDER BY logs.executed_at DESC LIMIT $2 OFFSET $3`,
++        [req.auth!.organizationId, limit, offset]
+       );
+       res.json({ success: true, data: result.rows });
+     } catch {
+@@ -66,7 +70,7 @@ schedulesRouter.get('/:id', async (req: Request, res: Response) => {
+     const db = await getDb();
+     const { id } = req.params;
+     
+-    const schedule = await db.schedules.findById(id);
++    const schedule = await db.schedules.findById(id, req.auth!.organizationId);
+     if (!schedule) {
+       return res.status(404).json({ success: false, error: 'Schedule not found' });
+     }
+@@ -94,6 +98,9 @@ schedulesRouter.post('/', async (req: Request, res: Response) => {
+       });
+     }
+ 
++    const course = await db.courses.findById(courseId, req.auth!.organizationId);
++    if (!course) return res.status(404).json({ success: false, error: 'Course not found' });
++
+     const schedule = await db.schedules.create({
+       courseId,
+       name,
+@@ -129,7 +136,7 @@ schedulesRouter.put('/:id', async (req: Request, res: Response) => {
+       sendTime,
+       timezone,
+       isActive
+-    });
++    }, req.auth!.organizationId);
+ 
+     if (!schedule) {
+       return res.status(404).json({ success: false, error: 'Schedule not found' });
+@@ -152,7 +159,9 @@ schedulesRouter.delete('/:id', async (req: Request, res: Response) => {
+     const db = await getDb();
+     const { id } = req.params;
+ 
+-    await db.schedules.delete(id);
++    const schedule = await db.schedules.findById(id, req.auth!.organizationId);
++    if (!schedule) return res.status(404).json({ success: false, error: 'Schedule not found' });
++    await db.schedules.delete(id, req.auth!.organizationId);
+     logger.info(`Schedule deleted: ${id}`);
+     
+     res.json({ success: true });
+@@ -168,9 +177,13 @@ schedulesRouter.delete('/:id', async (req: Request, res: Response) => {
+  */
+ schedulesRouter.post('/:id/execute', async (req: Request, res: Response) => {
+   try {
++    const db = await getDb();
+     const scheduler = await getScheduler();
+     const { id } = req.params;
+ 
++    const schedule = await db.schedules.findById(id, req.auth!.organizationId);
++    if (!schedule) return res.status(404).json({ success: false, error: 'Schedule not found' });
++
+     const result = await scheduler.executeNow(id);
+     
+     logger.info(`Schedule ${id} executed: ${result.sent} sent, ${result.failed} failed`);
+@@ -187,9 +200,13 @@ schedulesRouter.post('/:id/execute', async (req: Request, res: Response) => {
+  */
+ schedulesRouter.post('/:id/trigger', async (req: Request, res: Response) => {
+   try {
++    const db = await getDb();
+     const scheduler = await getScheduler();
+     const { id } = req.params;
+ 
++    const schedule = await db.schedules.findById(id, req.auth!.organizationId);
++    if (!schedule) return res.status(404).json({ success: false, error: 'Schedule not found' });
++
+     const result = await scheduler.executeNow(id);
+ 
+     logger.info(`Schedule ${id} triggered: ${result.sent} sent, ${result.failed} failed`);
+@@ -209,7 +226,7 @@ schedulesRouter.post('/:id/pause', async (req: Request, res: Response) => {
+     const db = await getDb();
+     const { id } = req.params;
+ 
+-    const schedule = await db.schedules.update(id, { isActive: false });
++    const schedule = await db.schedules.update(id, { isActive: false }, req.auth!.organizationId);
+     if (!schedule) {
+       return res.status(404).json({ success: false, error: 'Schedule not found' });
+     }
+@@ -231,7 +248,7 @@ schedulesRouter.post('/:id/resume', async (req: Request, res: Response) => {
+     const db = await getDb();
+     const { id } = req.params;
+ 
+-    const schedule = await db.schedules.update(id, { isActive: true });
++    const schedule = await db.schedules.update(id, { isActive: true }, req.auth!.organizationId);
+     if (!schedule) {
+       return res.status(404).json({ success: false, error: 'Schedule not found' });
+     }
+@@ -256,6 +273,9 @@ schedulesRouter.get('/:id/logs', async (req: Request, res: Response) => {
+     const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
+     const offset = (page - 1) * limit;
+ 
++    const schedule = await db.schedules.findById(id, req.auth!.organizationId);
++    if (!schedule) return res.status(404).json({ success: false, error: 'Schedule not found' });
++
+     // schedule_execution_logs table may not exist yet — return empty list gracefully
+     try {
+       const result = await db.raw(
+diff --git a/packages/delivery/src/services/certificateService.ts b/packages/delivery/src/services/certificateService.ts
+index 62ec21db..95651ddc 100644
+--- a/packages/delivery/src/services/certificateService.ts
++++ b/packages/delivery/src/services/certificateService.ts
+@@ -9,6 +9,7 @@
+  */
+ 
+ import PDFDocument from 'pdfkit';
++import { randomBytes, timingSafeEqual } from 'node:crypto';
+ 
+ const getDb = () => import('@ekatra/database').then(m => m.db);
+ 
+@@ -165,17 +166,33 @@ const RAILWAY_URL =
+ 
+ /**
+  * Check if a cached certificate is still valid (< 24 hrs old).
+- * Returns the cached URL or null.
++ * Returns the cached URL or null. When `course` is given, the cached
++ * certificate is only reused if it was issued for that same course (by id when
++ * both sides have one, otherwise by title) — a learner finishing a second
++ * course within 24h must not be handed the first course's certificate.
+  */
+-export function getCachedCertificate(learner: any): string | null {
++export function getCachedCertificate(learner: any, course?: { id?: string; title?: string }): string | null {
+   const meta = learner.metadata || {};
+   const generatedAt: string | undefined = meta.certificateGeneratedAt;
+   const url: string | undefined = meta.certificateUrl;
+-  if (!generatedAt || !url) return null;
++  if (!generatedAt || !url || !meta.certificateAccessToken || !url.includes('token=')) return null;
++  if (course) {
++    const sameCourse = course.id && meta.certificateCourseId
++      ? meta.certificateCourseId === course.id
++      : meta.certificateCourse === sanitizeForPDF(course.title, 100);
++    if (!sameCourse) return null;
++  }
+   const age = Date.now() - new Date(generatedAt).getTime();
+   return age < CACHE_TTL_MS ? url : null;
+ }
+ 
++export function matchesCertificateAccessToken(supplied: unknown, expected: unknown): boolean {
++  if (typeof supplied !== 'string' || typeof expected !== 'string' || supplied.length !== expected.length) {
++    return false;
++  }
++  return timingSafeEqual(Buffer.from(supplied), Buffer.from(expected));
++}
++
+ /**
+  * Generate, store, and return a certificate URL for a learner/course pair.
+  * Respects 24-hour cache — returns existing URL if still fresh.
+@@ -183,9 +200,10 @@ export function getCachedCertificate(learner: any): string | null {
+ export async function issueCertificate(
+   learner: any,
+   courseTitle: string,
++  courseId?: string,
+ ): Promise<{ url: string; fromCache: boolean }> {
+-  // Cache check
+-  const cached = getCachedCertificate(learner);
++  // Cache check — only for the same course
++  const cached = getCachedCertificate(learner, { id: courseId, title: courseTitle });
+   if (cached) return { url: cached, fromCache: true };
+ 
+   const db = await getDb();
+@@ -197,7 +215,8 @@ export async function issueCertificate(
+     new Date(),
+   );
+   const base64 = pdfBuffer.toString('base64');
+-  const url = `${RAILWAY_URL}/api/certificates/${learner.id}`;
++  const accessToken = randomBytes(32).toString('base64url');
++  const url = `${RAILWAY_URL}/api/certificates/${learner.id}?token=${encodeURIComponent(accessToken)}`;
+ 
+   // Persist in metadata
+   const existing = learner.metadata || {};
+@@ -206,8 +225,10 @@ export async function issueCertificate(
+       ...existing,
+       certificateBase64: base64,
+       certificateUrl: url,
++      certificateAccessToken: accessToken,
+       certificateGeneratedAt: new Date().toISOString(),
+       certificateCourse: sanitizeForPDF(courseTitle, 100),
++      certificateCourseId: courseId, // undefined drops a stale id from a previous course
+     },
+   });
+ 
+diff --git a/packages/delivery/src/services/courseDelivery.ts b/packages/delivery/src/services/courseDelivery.ts
+index 5d22fb30..ce2d10c3 100644
+--- a/packages/delivery/src/services/courseDelivery.ts
++++ b/packages/delivery/src/services/courseDelivery.ts
+@@ -400,7 +400,7 @@ export class CourseDeliveryService {
+         // Issue certificate — generate PDF, send as document
+         try {
+           const freshLearner = await db.learners.findById(learner.id);
+-          const { url, fromCache } = await issueCertificate(freshLearner, courseTitle);
++          const { url, fromCache } = await issueCertificate(freshLearner, courseTitle, enrollment.course_id);
+           await delay(3000);
+           await checkedSend(messaging.sendDocument(learner.phone, {
+             documentUrl: url,
