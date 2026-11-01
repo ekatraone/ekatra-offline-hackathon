@@ -1,0 +1,179 @@
+diff --git a/apps/backend/src/index.ts b/apps/backend/src/index.ts
+index 9aa67551..36675e01 100644
+--- a/apps/backend/src/index.ts
++++ b/apps/backend/src/index.ts
+@@ -206,6 +206,11 @@ async function initializeServices() {
+       });
+       
+       scheduler = getScheduler();
++
++      if (messagingConfiguration(process.env).provider === 'cloudapi') {
++        const { startWebhookRecovery } = await import('./services/webhookRecovery.js');
++        startWebhookRecovery(Number(process.env.WEBHOOK_RECOVERY_INTERVAL_MS) || 15_000);
++      }
+       
+       logger.info('✅ Database and messaging services initialized');
+     } catch (error) {
+diff --git a/apps/backend/src/routes/webhooks.ts b/apps/backend/src/routes/webhooks.ts
+index a5e4470b..55fe17e8 100644
+--- a/apps/backend/src/routes/webhooks.ts
++++ b/apps/backend/src/routes/webhooks.ts
+@@ -7,10 +7,14 @@
+ import { Router, Request, Response } from 'express';
+ import { requireWebhookProvider, verifyMetaSignature, verifySharedSecret } from '../middleware/webhookSecurity.js';
+ import twilio from 'twilio';
+-import { MessageHandler } from '../services/messageHandler.js';
++import { LearnerBusyError, MessageHandler } from '../services/messageHandler.js';
+ import { logger } from '../lib/logger.js';
+ import { markdownToWhatsApp } from '../lib/whatsappFormatter.js';
+-import { markWebhookSeen } from '../lib/redis.js';
++import {
++  extractCloudApiReceiptEvents,
++  processCloudApiReceiptEvent,
++  type CloudApiReceiptEvent,
++} from '../services/cloudApiReceipts.js';
+ 
+ export { markdownToWhatsApp }; // re-export for service use
+ 
+@@ -75,14 +79,50 @@ webhookRouter.post('/whatsapp', requireWebhookProvider('cloudapi'), async (req:
+     return res.sendStatus(401);
+   }
+ 
+-  // Respond immediately (Meta requires response within 20 seconds)
+-  res.sendStatus(200);
+-
+-  // Process asynchronously
++  // Persist and claim each provider event before acknowledging the batch. If the
++  // database is unavailable, return 503 so Meta retries instead of losing it.
++  const events = extractCloudApiReceiptEvents(req.body);
++  const claimed: Array<{ receiptId: string; event: CloudApiReceiptEvent }> = [];
+   try {
+-    await processWebhook(req.body);
++    const db = await getDb();
++    for (const event of events) {
++      const receipt = await db.webhookReceipts.receiveAndClaim({
++        provider: 'cloudapi',
++        externalEventId: event.externalEventId,
++        eventType: event.eventType,
++        payload: { payload: event.payload, context: event.context },
++      });
++      if (receipt.claimed) claimed.push({ receiptId: receipt.id, event });
++    }
+   } catch (error) {
+-    logger.error('Error processing webhook:', error);
++    logger.error('Unable to persist webhook receipt:', error);
++    return res.sendStatus(503);
++  }
++
++  res.sendStatus(200);
++
++  // Process after acknowledgment. processCloudApiReceiptEvent rejects when the
++  // event was not handled (error, or learner lock busy), so only real success is
++  // marked processed; anything else stays durable and claimable by a provider
++  // retry or the recovery worker.
++  for (const item of claimed) {
++    try {
++      await processCloudApiReceiptEvent(item.event, messageHandler);
++      const db = await getDb();
++      await db.webhookReceipts.markProcessed(item.receiptId);
++    } catch (error) {
++      if (error instanceof LearnerBusyError) {
++        logger.warn(`Webhook receipt ${item.receiptId} deferred: ${error.message}`);
++      } else {
++        logger.error(`Error processing webhook receipt ${item.receiptId}:`, error);
++      }
++      try {
++        const db = await getDb();
++        await db.webhookReceipts.markFailed(item.receiptId, error);
++      } catch (markError) {
++        logger.error(`Unable to mark webhook receipt ${item.receiptId} failed:`, markError);
++      }
++    }
+   }
+ });
+ 
+@@ -117,54 +157,6 @@ webhookRouter.post('/wati', async (req: Request, res: Response) => {
+   }
+ });
+ 
+-/**
+- * Process Cloud API webhook payload
+- */
+-async function processWebhook(body: any): Promise<void> {
+-  if (body.object !== 'whatsapp_business_account') {
+-    return;
+-  }
+-
+-  for (const entry of body.entry || []) {
+-    for (const change of entry.changes || []) {
+-      if (change.field !== 'messages') continue;
+-
+-      const value = change.value;
+-
+-      // Process incoming messages
+-      for (const message of value.messages || []) {
+-        // Idempotency check — WhatsApp retries webhooks; skip already-processed messages
+-        if (message.id) {
+-          const isNew = await markWebhookSeen(message.id);
+-          if (!isNew) {
+-            logger.info(`⏭️  Skipping duplicate webhook message ${message.id}`);
+-            continue;
+-          }
+-        }
+-
+-        const contact = value.contacts?.find((c: any) => c.wa_id === message.from);
+-
+-        await messageHandler.handle({
+-          from: message.from,
+-          name: contact?.profile?.name,
+-          timestamp: message.timestamp,
+-          type: message.type,
+-          text: message.text?.body,
+-          mediaId: message.image?.id || message.document?.id || message.audio?.id || message.video?.id,
+-          buttonPayload: message.button?.payload,
+-          listReplyId: message.interactive?.list_reply?.id,
+-          buttonReplyId: message.interactive?.button_reply?.id
+-        });
+-      }
+-
+-      // Process status updates
+-      for (const status of value.statuses || []) {
+-        await processStatusUpdate(status);
+-      }
+-    }
+-  }
+-}
+-
+ /**
+  * Process message status updates (delivered, read, failed, undelivered, sent, queued, etc.)
+  * Called from both the Cloud API webhook and the Twilio webhook handler.
+@@ -180,20 +172,16 @@ async function processStatusUpdate(status: {
+   timestamp?: string;
+   metadata?: Record<string, any>;
+ }): Promise<void> {
+-  try {
+-    let ts: Date;
+-    if (status.timestamp) {
+-      // Cloud API sends unix epoch; Twilio sends ISO or RFC2822 string
+-      const asNum = parseInt(status.timestamp, 10);
+-      ts = isNaN(asNum) ? new Date(status.timestamp) : new Date(asNum * 1000);
+-    } else {
+-      ts = new Date();
+-    }
+-    const db = await getDb();
+-    await db.messageLog.updateStatus(status.id, status.status, ts, status.metadata);
+-  } catch (error) {
+-    logger.error('Error processing status update:', error);
++  let ts: Date;
++  if (status.timestamp) {
++    // Cloud API sends unix epoch; Twilio sends ISO or RFC2822 string
++    const asNum = parseInt(status.timestamp, 10);
++    ts = isNaN(asNum) ? new Date(status.timestamp) : new Date(asNum * 1000);
++  } else {
++    ts = new Date();
+   }
++  const db = await getDb();
++  await db.messageLog.updateStatus(status.id, status.status, ts, status.metadata);
+ }
+ 
+ 
