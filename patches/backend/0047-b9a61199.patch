@@ -1,0 +1,14 @@
+diff --git a/.env.example b/.env.example
+index dfaf533e..4bd36d61 100644
+--- a/.env.example
++++ b/.env.example
+@@ -37,6 +37,9 @@ META_WEBHOOK_VERIFY_TOKEN=your_random_verify_token_change_me
+ # App Secret (found in App Settings > Basic)
+ META_APP_SECRET=your_app_secret
+ 
++# Optional durable-receipt recovery scan interval. Minimum 5000ms; default 15000ms.
++WEBHOOK_RECOVERY_INTERVAL_MS=15000
++
+ # WhatsApp API Version
+ WHATSAPP_API_VERSION=v21.0
+ 
