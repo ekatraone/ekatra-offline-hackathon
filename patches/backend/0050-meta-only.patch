@@ -1,0 +1,132 @@
+diff --git a/apps/backend/src/lib/azureOpenAI.ts b/apps/backend/src/lib/azureOpenAI.ts
+index 353fc83..dad77f3 100644
+--- a/apps/backend/src/lib/azureOpenAI.ts
++++ b/apps/backend/src/lib/azureOpenAI.ts
+@@ -7,6 +7,7 @@
+ 
+ import { AzureOpenAI } from 'openai';
+ import { logger } from './logger.js';
++import { metaOnly } from './metaOnly.js';
+ 
+ export interface AzureOpenAIConfig {
+   endpoint: string;
+@@ -70,6 +71,9 @@ class AzureOpenAIService {
+    * Get the Azure OpenAI client
+    */
+   getClient(): AzureOpenAI {
++    if (metaOnly()) {
++      throw new Error('Azure OpenAI is disabled: META_ONLY is on, only Meta models may be called.');
++    }
+     if (!this.client) {
+       throw new Error('Azure OpenAI client not initialized. Check your environment variables.');
+     }
+@@ -80,7 +84,8 @@ class AzureOpenAIService {
+    * Check if Azure OpenAI is available
+    */
+   isAvailable(): boolean {
+-    return this.client !== null;
++    // META_ONLY: nothing but Meta models may be called, so RAG embeddings and Whisper stay off.
++    return !metaOnly() && this.client !== null;
+   }
+ 
+   /**
+diff --git a/apps/backend/src/lib/llm.ts b/apps/backend/src/lib/llm.ts
+index cf58476..899a213 100644
+--- a/apps/backend/src/lib/llm.ts
++++ b/apps/backend/src/lib/llm.ts
+@@ -4,13 +4,15 @@
+  * Prefers Anthropic/Claude (AZURE_ANTHROPIC_API_KEY); falls back to
+  * Azure OpenAI (AZURE_OPENAI_*) when Claude is not configured, then to the
+  * Meta Model API (MODEL_API_KEY). Pass `provider: 'meta'` to force the Meta (Muse) model.
+- * All clients return an OpenAI-style completion, so callers read
++ * With META_ONLY on (see metaOnly.ts) only the Meta Model API is used: the Anthropic and
++ * Azure branches are skipped. All clients return an OpenAI-style completion, so callers read
+  * `completion.choices[0].message.content` either way.
+  */
+ 
+ import { anthropicClient } from './anthropicClient.js';
+ import { azureOpenAI } from './azureOpenAI.js';
+ import { metaModelClient, metaModelId } from './metaModelClient.js';
++import { metaOnly } from './metaOnly.js';
+ 
+ export interface LlmChatParams {
+   messages: Array<{ role: string; content: string }>;
+@@ -21,6 +23,7 @@ export interface LlmChatParams {
+ }
+ 
+ export function llmAvailable(): boolean {
++  if (metaOnly()) return metaModelClient.isAvailable();
+   return anthropicClient.isAvailable() || azureOpenAI.isAvailable() || metaModelClient.isAvailable();
+ }
+ 
+@@ -52,11 +55,12 @@ export async function llmChat(params: LlmChatParams): Promise<any> {
+     const c = await metaModelClient.createChatCompletion(params);
+     return tag(c, { provider: 'meta', model: metaModelId() });
+   }
+-  if (anthropicClient.isAvailable()) {
++  const nonMeta = !metaOnly();
++  if (nonMeta && anthropicClient.isAvailable()) {
+     const c = await anthropicClient.createChatCompletion(params);
+     return tag(c, { provider: 'anthropic', model: reportedModel(c, process.env.AZURE_ANTHROPIC_MODEL || 'claude-sonnet-4-5') });
+   }
+-  if (azureOpenAI.isAvailable()) {
++  if (nonMeta && azureOpenAI.isAvailable()) {
+     const c = await azureOpenAI.createChatCompletion(params);
+     return tag(c, { provider: 'azure', model: reportedModel(c, process.env.AZURE_OPENAI_DEPLOYMENT || 'azure-openai') });
+   }
+@@ -64,5 +68,9 @@ export async function llmChat(params: LlmChatParams): Promise<any> {
+     const c = await metaModelClient.createChatCompletion(params);
+     return tag(c, { provider: 'meta', model: metaModelId() });
+   }
+-  throw new Error('No LLM configured — set AZURE_ANTHROPIC_API_KEY, AZURE_OPENAI_API_KEY or MODEL_API_KEY');
++  throw new Error(
++    nonMeta
++      ? 'No LLM configured — set AZURE_ANTHROPIC_API_KEY, AZURE_OPENAI_API_KEY or MODEL_API_KEY'
++      : 'No LLM configured — META_ONLY is on, set MODEL_API_KEY (Meta Model API)',
++  );
+ }
+diff --git a/packages/delivery/package.json b/packages/delivery/package.json
+index d313526..020ba16 100644
+--- a/packages/delivery/package.json
++++ b/packages/delivery/package.json
+@@ -10,6 +10,7 @@
+     ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+     "./certificates": { "types": "./dist/services/certificateService.d.ts", "import": "./dist/services/certificateService.js" },
+     "./logger": { "types": "./dist/lib/logger.d.ts", "import": "./dist/lib/logger.js" },
++    "./metaOnly": { "types": "./dist/lib/metaOnly.d.ts", "import": "./dist/lib/metaOnly.js" },
+     "./models": { "types": "./dist/lib/modelRouter.d.ts", "import": "./dist/lib/modelRouter.js" },
+     "./formatter": { "types": "./dist/lib/whatsappFormatter.d.ts", "import": "./dist/lib/whatsappFormatter.js" },
+     "./configuration": { "types": "./dist/configuration.d.ts", "import": "./dist/configuration.js" }
+diff --git a/packages/delivery/src/lib/modelRouter.ts b/packages/delivery/src/lib/modelRouter.ts
+index 2b42d3f..2bb1161 100644
+--- a/packages/delivery/src/lib/modelRouter.ts
++++ b/packages/delivery/src/lib/modelRouter.ts
+@@ -16,6 +16,7 @@
+  */
+ 
+ import { logger } from './logger.js';
++import { metaOnly } from './metaOnly.js';
+ 
+ const API_VERSION = '2025-01-01-preview';
+ const IMAGE_API_VERSION = '2025-04-01-preview';
+@@ -49,16 +50,17 @@ async function azureFetch(path: string, body: any, timeoutMs = 120_000): Promise
+ 
+ export const modelRouter = {
+   isAvailable(): boolean {
+-    return Boolean(endpoint() && apiKey());
++    // META_ONLY: this router talks to Azure OpenAI, so it is off when only Meta models may run.
++    return !metaOnly() && Boolean(endpoint() && apiKey());
+   },
+ 
+   capabilities() {
+     return {
+       text: this.isAvailable(),
+       image: this.isAvailable(),
+-      speech: Boolean(process.env.AZURE_SPEECH_KEY && process.env.AZURE_SPEECH_REGION),
++      speech: !metaOnly() && Boolean(process.env.AZURE_SPEECH_KEY && process.env.AZURE_SPEECH_REGION),
+       transcribe: this.isAvailable(),
+-      video: Boolean(VIDEO_DEPLOYMENT()),
++      video: !metaOnly() && Boolean(VIDEO_DEPLOYMENT()),
+     };
+   },
+ 
