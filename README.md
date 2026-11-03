@@ -97,7 +97,7 @@ You need: Node 22.18.x, pnpm 10.28.1, PostgreSQL 14+, git. For the Android part:
 ### 1. Clone this repository and the bases
 
 ```
-git clone <this repository> ekatra-offline                           # event work
+git clone https://github.com/ekatraone/ekatra-offline ekatra-offline                           # event work
 git clone https://github.com/ekatraone/ekatra-platform-base          # backend base, single commit
 git clone --recurse-submodules https://github.com/ekatraone/ekatra-maya-android-base   # Android base + llama.cpp
 ```
