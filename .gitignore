@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+build/
+.gradle/
+local.properties
+*.keystore
+*.jks
+google-services.json
+*.gguf
+.DS_Store
