@@ -1,0 +1,61 @@
+diff --git a/apps/backend/src/flows/conversationFSM.ts b/apps/backend/src/flows/conversationFSM.ts
+index 670150b2..95de3b6c 100644
+--- a/apps/backend/src/flows/conversationFSM.ts
++++ b/apps/backend/src/flows/conversationFSM.ts
+@@ -384,8 +384,8 @@ export class ConversationFSM {
+     const isHindi = lang === 'hi';
+     await messaging.sendText(learner.phone, {
+       text: isHindi
+-        ? `बढ़िया! 🤩\n\nमैं *Alfred* हूँ — आपका AI टीचर, जो किसी भी विषय पर कोर्स बना सकता है।\n\nआप क्या सीखना चाहते हैं? (उदाहरण: "Python basics" या "शेयर मार्केट की बेसिक्स")`
+-        : `That's amazing! 🤩\n\nI'm *Alfred*, your AI tutor — I can create a course on any topic you choose.\n\nWhat would you like to learn?\n\n_Example: "Python basics" or "Marketing fundamentals"_`,
++        ? `बढ़िया! 🤩\n\nमैं *Maya* हूँ — आपका AI टीचर, जो किसी भी विषय पर कोर्स बना सकता है।\n\nआप क्या सीखना चाहते हैं? (उदाहरण: "Python basics" या "शेयर मार्केट की बेसिक्स")`
++        : `That's amazing! 🤩\n\nI'm *Maya*, your AI tutor — I can create a course on any topic you choose.\n\nWhat would you like to learn?\n\n_Example: "Python basics" or "Marketing fundamentals"_`,
+     });
+   }
+ 
+@@ -525,8 +525,8 @@ export class ConversationFSM {
+ 
+     await messaging.sendInteractiveButtons(learner.phone, {
+       body: isHindi
+-        ? `✅ *आपका लर्निंग प्लान:*\n\n📌 *विषय:* ${topic}\n🎯 *लक्ष्य:* ${goal}\n✍️ *शैली:* ${styleLabel}\n📚 *${micro ? '3 छोटे पाठ' : '5 छोटे पाठ'}*, हर एक ~${micro ? '1' : '3'} मिनट\n\nक्या Alfred इसे आपके लिए बनाए?`
+-        : `✅ *Here's your learning plan:*\n\n📌 *Topic:* ${topic}\n🎯 *Goal:* ${goal}\n✍️ *Style:* ${styleLabel}\n📚 *${micro ? '3 bite-sized lessons' : '5 bite-sized lessons'}*, each ~${micro ? '1' : '3'} min\n✨ *Includes:* Explanations, quizzes & flashcards\n\nShall Alfred generate this course for you?`,
++        ? `✅ *आपका लर्निंग प्लान:*\n\n📌 *विषय:* ${topic}\n🎯 *लक्ष्य:* ${goal}\n✍️ *शैली:* ${styleLabel}\n📚 *${micro ? '3 छोटे पाठ' : '5 छोटे पाठ'}*, हर एक ~${micro ? '1' : '3'} मिनट\n\nक्या Maya इसे आपके लिए बनाए?`
++        : `✅ *Here's your learning plan:*\n\n📌 *Topic:* ${topic}\n🎯 *Goal:* ${goal}\n✍️ *Style:* ${styleLabel}\n📚 *${micro ? '3 bite-sized lessons' : '5 bite-sized lessons'}*, each ~${micro ? '1' : '3'} min\n✨ *Includes:* Explanations, quizzes & flashcards\n\nShall Maya generate this course for you?`,
+       buttons: [
+         { id: 'confirm_yes', title: isHindi ? 'हाँ, शुरू करें!' : 'Yes, start!' },
+         { id: 'confirm_change', title: isHindi ? 'विषय बदलें' : 'Change topic' },
+diff --git a/apps/backend/src/services/messageHandler.ts b/apps/backend/src/services/messageHandler.ts
+index a4dd9b77..a167b463 100644
+--- a/apps/backend/src/services/messageHandler.ts
++++ b/apps/backend/src/services/messageHandler.ts
+@@ -167,7 +167,7 @@ export class MessageHandler {
+ 
+     // Welcome message — FSM will take over from here on the next message
+     await messaging.sendText(phone, {
+-      text: `Welcome to *Ekatra*! 🎉\n\nI'm *Alfred*, your personal AI tutor.\n\nType anything to get started — I'll help you learn any topic in bite-sized lessons, right here on WhatsApp! 📱`,
++      text: `Welcome to *Ekatra*! 🎉\n\nI'm *Maya*, your personal AI tutor.\n\nType anything to get started — I'll help you learn any topic in bite-sized lessons, right here on WhatsApp! 📱`,
+     });
+ 
+     // Fire student_registration template so Twilio registers the subscriber
+diff --git a/apps/backend/src/services/qaService.ts b/apps/backend/src/services/qaService.ts
+index 6686dfa7..130997e1 100644
+--- a/apps/backend/src/services/qaService.ts
++++ b/apps/backend/src/services/qaService.ts
+@@ -29,7 +29,7 @@ export class QAService {
+       /ignore\s+(all\s+)?(previous|above|prior)\s+(instructions?|prompts?|rules?)/gi,
+       /disregard\s+(all\s+)?(previous|above|prior)/gi,
+       /you\s+are\s+now\s+/gi,
+-      /act\s+as\s+(if\s+you\s+are\s+|a\s+)?(?!alfred)/gi, // allow "act as Alfred" but not arbitrary role changes
++      /act\s+as\s+(if\s+you\s+are\s+|a\s+)?(?!maya)/gi, // allow "act as Maya" but not arbitrary role changes
+       /system\s*:\s*/gi,
+       /assistant\s*:\s*/gi,
+       /<\|.*?\|>/g, // model control tokens (e.g. <|endoftext|>)
+@@ -162,7 +162,7 @@ export class QAService {
+ 
+     const langLabel = language === 'hi' ? 'Hindi' : language === 'ar' ? 'Arabic' : 'English';
+ 
+-    const systemPrompt = `You are Alfred, a helpful tutor for "${courseName}".
++    const systemPrompt = `You are Maya, a helpful tutor for "${courseName}".
+ 
+ Answer the learner's question clearly and directly first, then optionally ask ONE follow-up question to deepen understanding.
+ 
