@@ -3,7 +3,8 @@
 #
 #   scripts/apply_overlay.sh --backend <dir> [--android <dir>] [--force]
 #
-# <dir> must be a checkout of the pinned pre-event base (see PINNED BASES below).
+# <dir> must be a checkout of the pinned pre-event base (see PINNED BASES below), either the
+# private commit itself or the published sanitised snapshot whose commit subject names it.
 # The script (1) copies the event-authored files from backend/ and android/ into
 # the checkout, (2) applies patches/<codebase>/*.patch in numeric order with
 # `git apply`, and (3) removes the files listed in patches/<codebase>/*.deletes.
@@ -30,9 +31,15 @@ done
 check_base() { # dir pin name
   if git -C "$1" rev-parse --git-dir >/dev/null 2>&1; then
     head="$(git -C "$1" rev-parse HEAD)"
+    subject="$(git -C "$1" log -1 --format=%s HEAD)"
     case "$head" in
       $2*) ;;
-      *) if [ "$FORCE" = 1 ]; then echo "warning: $3 HEAD is ${head:0:8}, expected $2" >&2
+      *) case "$subject" in
+           "Pre-event base snapshot of "*" at $2 (sanitised)") continue_ok=1;;
+           *) continue_ok=0;;
+         esac
+         if [ "$continue_ok" = 1 ]; then :
+         elif [ "$FORCE" = 1 ]; then echo "warning: $3 HEAD is ${head:0:8}, expected $2" >&2
          else echo "$3 checkout is at ${head:0:8} but the overlay is pinned to $2 (use --force to try anyway)" >&2; exit 1; fi;;
     esac
   else
