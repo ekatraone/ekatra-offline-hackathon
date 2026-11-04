@@ -97,7 +97,7 @@ You need: Node 22.18.x, pnpm 10.28.1, PostgreSQL 14+, git. For the Android part:
 ### 1. Clone this repository and the bases
 
 ```
-git clone https://github.com/ekatraone/ekatra-offline ekatra-offline                           # event work
+git clone https://github.com/ekatraone/ekatra-offline-hackathon ekatra-offline-hackathon                           # event work
 git clone https://github.com/ekatraone/ekatra-platform-base          # backend base, single commit
 git clone --recurse-submodules https://github.com/ekatraone/ekatra-maya-android-base   # Android base + llama.cpp
 ```
@@ -107,7 +107,7 @@ Put the three directories side by side. The directory layout is what matters, no
 ### 2. Apply the event work
 
 ```
-cd ekatra-offline
+cd ekatra-offline-hackathon
 scripts/apply_overlay.sh --backend ../ekatra-platform-base --android ../ekatra-maya-android-base
 ```
 
@@ -119,7 +119,7 @@ Needs Node 22.18.x, pnpm 10.28.1 (`npx pnpm@10.28.1` works), PostgreSQL 14+, and
 
 ```
 cd ../ekatra-platform-base
-cp ../ekatra-offline/.env.example .env      # then fill in the values, see step 4
+cp ../ekatra-offline-hackathon/.env.example .env      # then fill in the values, see step 4
 npx pnpm@10.28.1 install --frozen-lockfile
 npx pnpm@10.28.1 build:packages             # database, messaging, delivery
 createdb ekatra
