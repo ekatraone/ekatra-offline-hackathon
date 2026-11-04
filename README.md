@@ -8,7 +8,7 @@
 
 | | |
 |---|---|
-| **WhatsApp** | Message **+1 254 655 3377** (demo number). Pick a topic and Maya writes your course: pictures, quiz buttons, a review, a certificate. |
+| **WhatsApp** | Message **+1 254 655 3377** (demo number). Pick a topic and Maya writes your course: pictures, quiz buttons, a review, a certificate.<br><br><img src="docs/images/whatsapp-qr.png" width="150" alt="Scan to chat with Maya on WhatsApp"><br>_Scan to start, or open [wa.me/12546553377](https://wa.me/12546553377?text=Get%20Started%20with%20Maya)_ |
 | **Android app (hackathon build)** | Download the APK from the [`hackathon-submission-apk-1` release](https://github.com/ekatraone/ekatra-android-oss/releases/tag/hackathon-submission-apk-1). This is the public demo APK judges install. |
 | **Google Play** | [Maya AI on Google Play](https://play.google.com/store/apps/details?id=org.ekatra.alfred) is the chat tutor; an update is in progress. The Play version today does not include the Lessons, the Muse-written lessons or the images: those are in the APK above. |
 
