@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>About Ekatra AI</h2>
+<p>Ekatra AI is a secure, offline, educational AI assistant designed for privacy and local control. Version 2.1 introduces robust device discovery, WiFi management, and server-side Markdown rendering.</p>
+<ul>
+    <li>Model: {{ model_name or 'Unknown' }}</li>
+    <li>Features: Device Discovery, WiFi Management, System Monitoring, Markdown Rendering</li>
+    <li>Open Source: <a href="https://github.com/iabheejit/ekatra-ai-offline" target="_blank">GitHub</a></li>
+</ul>
+{% endblock %}

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Markdown Test</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        .test-content { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 8px; }
+        .markdown-output { background: #f5f5f5; padding: 15px; border-radius: 5px; }
+        .message-bubble ul, .message-bubble ol { margin: 10px 0; padding-left: 25px; }
+        .message-bubble li { margin: 5px 0; }
+        .message-bubble strong { color: #1a73e8; font-weight: 600; }
+        .message-bubble p { margin: 10px 0; }
+    </style>
+</head>
+<body>
+    <h1>Markdown Processing Test</h1>
+    
+    <div class="test-content">
+        <h2>Original Markdown Text:</h2>
+        <pre id="originalText">🤖 **Hello! I'm Alfred**, your expert AI learning assistant by Ekatra! 
+
+I'm designed to make learning engaging and effective by:
+- Breaking down complex topics into clear, digestible parts
+- Providing **step-by-step explanations** with real-world examples
+- Encouraging critical thinking through thought-provoking questions
+- Connecting concepts across different subjects
+
+I can help with **Mathematics**, **Science**, **History**, **Literature**, **Technology**, and many other subjects. Whether you need help understanding a concept, solving problems, or exploring new topics, I'm here to guide your learning journey!
+
+💡 **What would you like to explore today?**</pre>
+    </div>
+    
+    <div class="test-content">
+        <h2>Processed with Marked.js:</h2>
+        <div id="processedText" class="markdown-output message-bubble"></div>
+    </div>
+    
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const originalText = document.getElementById('originalText').textContent.trim();
+            const processedDiv = document.getElementById('processedText');
+            
+            // Process with marked
+            const processedContent = marked.parse(originalText);
+            processedDiv.innerHTML = processedContent;
+            
+            console.log('Original:', originalText);
+            console.log('Processed:', processedContent);
+        });
+    </script>
+</body>
+</html>

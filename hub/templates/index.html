@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="chat-container">
+    <div class="chat-header">
+        <h2>Chat with Ekatra AI</h2>
+        <div class="model-status">
+            {% if model_loaded %}
+                <span class="status-online">● {{ model_name }}</span>
+            {% else %}
+                <span class="status-offline">● Model Loading...</span>
+            {% endif %}
+        </div>
+    </div>
+    
+    <div id="chat-log"></div>
+    
+    <form id="chat-form" autocomplete="off">
+        <div class="chat-input-container">
+            <input type="text" id="chat-input" placeholder="Ask me anything about any subject..." autofocus required>
+            <button type="submit" id="send-btn">
+                <span>Send</span>
+            </button>
+        </div>
+    </form>
+    
+    <div id="chat-status"></div>
+    
+    <div class="chat-footer">
+        <small>Powered by {{ model_name or 'Ekatra AI' }} • Secure & Private • Educational Assistant</small>
+    </div>
+</div>
+
+<script>
+// Enhanced chat initialization
+document.addEventListener('DOMContentLoaded', function() {
+    const chatForm = document.getElementById('chat-form');
+    const chatInput = document.getElementById('chat-input');
+    const chatLog = document.getElementById('chat-log');
+    const chatStatus = document.getElementById('chat-status');
+    const sendBtn = document.getElementById('send-btn');
+    
+    // Welcome message
+    chatLog.innerHTML = `
+        <div class='ai-msg'>
+            <div class='msg-header'>
+                <strong>Ekatra AI</strong>
+                <span class='timestamp'>${new Date().toLocaleTimeString()}</span>
+            </div>
+            <div class='msg-content'>
+                Welcome! I'm your educational AI assistant. I'm here to help you learn and explore any topic. 
+                What would you like to know today? 📚
+            </div>
+        </div>
+    `;
+    
+    chatForm.onsubmit = async (e) => {
+        e.preventDefault();
+        const message = chatInput.value.trim();
+        if (!message) return;
+        
+        // Disable input during processing
+        chatInput.disabled = true;
+        sendBtn.disabled = true;
+        sendBtn.innerHTML = '<span>Thinking...</span>';
+        
+        // Add user message
+        addMessage('user', message);
+        chatInput.value = '';
+        chatStatus.textContent = 'AI is thinking...';
+        chatStatus.className = 'loading';
+        
+        try {
+            const response = await fetch('/api/generate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    message: message,
+                    format: 'html',
+                    timeout: 30
+                })
+            });
+            
+            const data = await response.json();
+            
+            if (data.success) {
+                addMessage('ai', data.data.response, true);
+                
+                // Show timing info
+                if (data.metadata && data.metadata.generation_time_ms) {
+                    chatStatus.textContent = `Response generated in ${data.metadata.generation_time_ms}ms`;
+                    setTimeout(() => { chatStatus.textContent = ''; }, 3000);
+                }
+            } else {
+                addMessage('error', `Error: ${data.error}`);
+            }
+            
+        } catch (err) {
+            console.error('Chat error:', err);
+            addMessage('error', `Connection error: ${err.message}`);
+        }
+        
+        // Re-enable input
+        chatInput.disabled = false;
+        sendBtn.disabled = false;
+        sendBtn.innerHTML = '<span>Send</span>';
+        chatStatus.className = '';
+        chatInput.focus();
+        chatLog.scrollTop = chatLog.scrollHeight;
+    };
+    
+    function addMessage(type, content, isHTML = false) {
+        const timestamp = new Date().toLocaleTimeString();
+        const msgDiv = document.createElement('div');
+        
+        let className = '';
+        let sender = '';
+        switch (type) {
+            case 'user':
+                className = 'user-msg';
+                sender = 'You';
+                break;
+            case 'ai':
+                className = 'ai-msg';
+                sender = 'Ekatra AI';
+                break;
+            case 'error':
+                className = 'error-msg';
+                sender = 'Error';
+                break;
+        }
+        
+        msgDiv.className = className;
+        
+        const headerDiv = document.createElement('div');
+        headerDiv.className = 'msg-header';
+        headerDiv.innerHTML = `<strong>${sender}</strong><span class='timestamp'>${timestamp}</span>`;
+        
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'msg-content';
+        
+        if (isHTML) {
+            contentDiv.innerHTML = content;
+        } else {
+            contentDiv.textContent = content;
+        }
+        
+        msgDiv.appendChild(headerDiv);
+        msgDiv.appendChild(contentDiv);
+        chatLog.appendChild(msgDiv);
+        chatLog.scrollTop = chatLog.scrollHeight;
+    }
+    
+    // Auto-focus input
+    chatInput.focus();
+    
+    // Keyboard shortcuts
+    chatInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+            chatForm.dispatchEvent(new Event('submit'));
+        }
+    });
+});
+</script>
+{% endblock %}

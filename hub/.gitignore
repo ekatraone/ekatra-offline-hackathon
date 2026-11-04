@@ -1,0 +1,27 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.venv/
+
+# Logs
+logs/
+*.log
+
+# Model weights
+models/
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# Hugging Face cache
+cache/
+*.lock
+
+# macOS
+.DS_Store
