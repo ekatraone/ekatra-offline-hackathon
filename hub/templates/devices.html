@@ -1,0 +1,200 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="devices-container">
+    <div class="devices-header">
+        <h2>Network Devices</h2>
+        <div class="devices-controls">
+            <label>
+                <input type="checkbox" id="ekatra-only" checked> 
+                Show only Ekatra-connected devices
+            </label>
+            <button id="refresh-btn" onclick="loadDevices()">🔄 Refresh</button>
+        </div>
+    </div>
+    
+    <div class="filter-tabs">
+        <button class="tab-btn active" onclick="setFilter('all')">All Networks</button>
+        <button class="tab-btn" onclick="setFilter('wifi')">WiFi Only</button>
+        <button class="tab-btn" onclick="setFilter('hotspot')">Hotspot Only</button>
+    </div>
+    
+    <div id="devices-list" class="devices-content">Loading...</div>
+</div>
+
+<script>
+let currentFilter = 'all';
+
+function setFilter(filter) {
+    currentFilter = filter;
+    
+    // Update tab appearance
+    document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+    event.target.classList.add('active');
+    
+    loadDevices();
+}
+
+async function loadDevices() {
+    const devicesList = document.getElementById('devices-list');
+    const ekatraOnly = document.getElementById('ekatra-only').checked;
+    const refreshBtn = document.getElementById('refresh-btn');
+    
+    devicesList.innerHTML = '<div class="loading-spinner">🔍 Scanning network...</div>';
+    refreshBtn.disabled = true;
+    refreshBtn.textContent = '⏳ Scanning...';
+    
+    try {
+        const params = new URLSearchParams({
+            filter: currentFilter,
+            deep: 'false',
+            ekatra_only: ekatraOnly.toString()
+        });
+        
+        const response = await fetch(`/api/devices?${params}`);
+        const data = await response.json();
+        
+        if (data.success) {
+            renderDevices(data.data, data.metadata);
+        } else {
+            devicesList.innerHTML = `<div class="error-message">❌ Error: ${data.error}</div>`;
+        }
+    } catch (err) {
+        devicesList.innerHTML = `<div class="error-message">❌ Network error: ${err.message}</div>`;
+    } finally {
+        refreshBtn.disabled = false;
+        refreshBtn.textContent = '🔄 Refresh';
+    }
+}
+
+function renderDevices(deviceData, metadata) {
+    const devicesList = document.getElementById('devices-list');
+    const subnets = deviceData.subnets;
+    
+    if (subnets.length === 0) {
+        devicesList.innerHTML = `
+            <div class="no-devices">
+                <h3>No network interfaces found</h3>
+                <p>Check your network connection and try again.</p>
+            </div>
+        `;
+        return;
+    }
+    
+    let html = '';
+    let totalDevices = 0;
+    
+    for (const subnet of subnets) {
+        totalDevices += subnet.devices.length;
+        
+        html += `
+            <div class="subnet-card">
+                <div class="subnet-header">
+                    <h3>📡 ${subnet.interface}</h3>
+                    <div class="subnet-info">
+                        <span class="subnet-cidr">${subnet.cidr}</span>
+                        <span class="device-count">${subnet.devices.length} device${subnet.devices.length !== 1 ? 's' : ''}</span>
+                    </div>
+                </div>
+        `;
+        
+        if (subnet.devices.length === 0) {
+            html += '<div class="no-devices-subnet">No devices found on this network</div>';
+        } else {
+            html += '<div class="devices-grid">';
+            for (const device of subnet.devices) {
+                const deviceType = device.device_type || 'Unknown';
+                const deviceIcon = getDeviceIcon(deviceType);
+                
+                html += `
+                    <div class="device-card">
+                        <div class="device-icon">${deviceIcon}</div>
+                        <div class="device-info">
+                            <div class="device-ip">${device.ip}</div>
+                            <div class="device-hostname">${device.hostname || 'Unknown Device'}</div>
+                            <div class="device-details">
+                                <span class="device-type">${deviceType}</span>
+                                ${device.mac ? `<span class="device-mac">${device.mac}</span>` : ''}
+                            </div>
+                            <div class="device-methods">${device.methods.join(', ')}</div>
+                        </div>
+                    </div>
+                `;
+            }
+            html += '</div>';
+        }
+        
+        if (subnet.errors && subnet.errors.length > 0) {
+            html += `<div class="subnet-warnings">⚠️ ${subnet.errors.join(', ')}</div>`;
+        }
+        
+        html += `
+                <div class="subnet-stats">
+                    <small>Scan time: ${subnet.scan_duration_ms}ms • Methods: ${subnet.scan_methods.join(', ')}</small>
+                </div>
+            </div>
+        `;
+    }
+    
+    // Add summary
+    html += `
+        <div class="scan-summary">
+            <h4>📊 Scan Summary</h4>
+            <div class="summary-grid">
+                <div class="summary-item">
+                    <span class="summary-label">Total Devices:</span>
+                    <span class="summary-value">${totalDevices}</span>
+                </div>
+                <div class="summary-item">
+                    <span class="summary-label">Networks Scanned:</span>
+                    <span class="summary-value">${subnets.length}</span>
+                </div>
+                <div class="summary-item">
+                    <span class="summary-label">Scan Time:</span>
+                    <span class="summary-value">${Math.round(deviceData.scan_duration_ms)}ms</span>
+                </div>
+                <div class="summary-item">
+                    <span class="summary-label">Methods:</span>
+                    <span class="summary-value">${deviceData.scan_methods.join(', ')}</span>
+                </div>
+            </div>
+            ${deviceData.self_network_only ? '<div class="filter-notice">🎯 Showing only Ekatra-connected devices</div>' : ''}
+        </div>
+    `;
+    
+    devicesList.innerHTML = html;
+}
+
+function getDeviceIcon(deviceType) {
+    const icons = {
+        'APPLE': '🍎',
+        'ANDROID': '🤖',
+        'SAMSUNG': '📱',
+        'GOOGLE': '🔍',
+        'AMAZON': '📦',
+        'MICROSOFT': '🪟',
+        'INTEL': '💻',
+        'RASPBERRY_PI': '🥧',
+        'NINTENDO': '🎮',
+        'SONY': '🎵',
+        'Unknown': '📱'
+    };
+    return icons[deviceType] || '📱';
+}
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', function() {
+    loadDevices();
+    
+    // Auto-refresh every 2 minutes
+    setInterval(loadDevices, 120000);
+    
+    // Keyboard shortcut F5 or Ctrl+R to refresh
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'F5' || ((e.ctrlKey || e.metaKey) && e.key === 'r')) {
+            e.preventDefault();
+            loadDevices();
+        }
+    });
+});
+</script>
+{% endblock %}

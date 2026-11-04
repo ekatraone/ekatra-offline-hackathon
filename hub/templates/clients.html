@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Connected Clients</h2>
+<div id="clients-list"></div>
+<script>
+async function loadClients() {
+    const res = await fetch('/api/clients/active');
+    const data = await res.json();
+    if (data.success) {
+        const clients = data.data.clients;
+        let html = `<ul>`;
+        for (const client of clients) {
+            html += `<li><b>${client.ip}</b> (${client.user_agent}) - Connected: ${client.connected_at}</li>`;
+        }
+        html += `</ul>`;
+        document.getElementById('clients-list').innerHTML = html;
+    } else {
+        document.getElementById('clients-list').textContent = data.error;
+    }
+}
+loadClients();
+</script>
+{% endblock %}
